@@ -35,3 +35,7 @@ coverage/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local voice transcripts and review screenshots
+/audio_transcripts/
+/docs/*.png
