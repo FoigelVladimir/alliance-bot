@@ -665,3 +665,62 @@ dialog::backdrop {
     transform:none!important
   }
 }
+
+/* Home page: one clear primary action, then actionable records. */
+.account button { color: #0f172a; }
+h1, h2, h3 { text-wrap: balance; }
+p { text-wrap: pretty; }
+.home-overview { display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 24px; margin-bottom: 32px; align-items: start; }
+.home-focus { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 32px; border: 1px solid #dbeafe; border-radius: 12px; background: #eff6ff; min-width: 0; }
+.home-eyebrow { display: block; color: #1d4ed8; font-size: 12px; line-height: 16px; font-weight: 600; margin-bottom: 16px; }
+.home-focus h2 { margin-bottom: 12px; }
+.home-focus p { color: #475569; max-width: 48ch; margin: 0 0 24px; }
+.focus-count { font-size: 36px; line-height: 40px; font-weight: 600; font-variant-numeric: tabular-nums; color: #1d4ed8; }
+.home-primary { display: inline-flex; align-items: center; justify-content: space-between; gap: 24px; background: #2563eb; color: white; padding: 12px 16px; border-radius: 8px; font-size: 16px; line-height: 24px; font-weight: 600; text-decoration: none; }
+.home-primary:hover { background: #1d4ed8; }
+.home-summary { padding-top: 4px; }
+.home-metric { display: flex; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid #e2e8f0; text-decoration: none; color: #334155; }
+.home-metric strong { margin-left: auto; color: #0f172a; font-size: 24px; line-height: 32px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.metric-arrow { color: #64748b; }
+.home-metric:hover { color: #1d4ed8; }
+.home-summary p { color: #64748b; font-size: 12px; line-height: 20px; }
+.home-work { display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 24px; align-items: start; }
+.home-section-head { display: flex; align-items: start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.home-section-head h2 { font-size: 18px; line-height: 28px; margin: 0; }
+.home-section-head p { margin: 8px 0 0; font-size: 12px; line-height: 20px; }
+.home-task { display: flex; align-items: center; gap: 12px; padding: 16px 0; border-bottom: 1px solid #f1f5f9; }
+.home-task:last-child { border: 0; padding-bottom: 0; }
+.task-symbol { width: 32px; height: 32px; border-radius: 8px; background: #fef3c7; color: #92400e; display: grid; place-items: center; font-weight: 600; flex-shrink: 0; }
+.task-copy { min-width: 0; }
+.task-copy strong { font-weight: 600; }
+.task-copy p { margin: 4px 0; color: #475569; overflow-wrap: anywhere; }
+.task-copy small { font-size: 12px; }
+.task-action { margin-left: auto; display: grid; justify-items: end; gap: 8px; flex-shrink: 0; }
+.task-action button { border: 0; color: #1d4ed8; padding: 8px 0 8px 12px; font-weight: 600; }
+.home-source { display: flex; align-items: start; gap: 12px; color: #334155; text-decoration: none; padding: 16px 0; overflow-wrap: anywhere; }
+.home-source:hover { color: #1d4ed8; }
+.home-source strong { display: block; font-size: 14px; line-height: 20px; font-weight: 500; }
+.home-source small { display: block; margin-top: 8px; font-size: 12px; }
+.home-source > span:last-child { margin-left: auto; }
+.source-symbol { color: #64748b; flex-shrink: 0; }
+.source-symbol svg { width: 20px; height: 20px; }
+.home-library-link { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 16px; padding: 12px 0 0; color: #1d4ed8; text-decoration: none; border-top: 1px solid #e2e8f0; }
+@media (max-width: 1199px) {
+  .home-overview, .home-work { grid-template-columns: minmax(0, 1fr); }
+  .home-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }
+  .home-summary p { grid-column: 1 / -1; margin-bottom: 0; }
+}
+@media (max-width: 767px) {
+  .home-focus { padding: 24px; gap: 12px; }
+  .home-focus h2 { font-size: 20px; line-height: 28px; }
+  .home-focus p { font-size: 14px; line-height: 20px; }
+  .home-primary { padding: 12px; gap: 12px; font-size: 14px; line-height: 20px; }
+  .home-overview { gap: 12px; margin-bottom: 24px; }
+  .home-summary { gap: 0 16px; }
+  .home-metric { font-size: 12px; line-height: 16px; }
+  .focus-count { font-size: 30px; line-height: 36px; }
+  .home-task { flex-wrap: wrap; }
+  .task-copy { flex: 1; }
+  .task-action { width: 100%; margin-left: 0; display: flex; align-items: center; justify-content: space-between; }
+  .home-source { min-height: 48px; }
+}
