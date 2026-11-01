@@ -1,0 +1,199 @@
+{
+  "main": {
+    "id": "ce4cdb6616eacf6b",
+    "type": "split",
+    "children": [
+      {
+        "id": "e73239bb4643e15e",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "88cebb8a0c3d2e2f",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Граф"
+            }
+          },
+          {
+            "id": "70be1a212dfb687c",
+            "type": "leaf",
+            "state": {
+              "type": "graph",
+              "state": {},
+              "icon": "lucide-git-fork",
+              "title": "Граф"
+            }
+          }
+        ],
+        "currentTab": 1
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "6a4606ff10ab41f5",
+    "type": "split",
+    "children": [
+      {
+        "id": "1964f9eb8d97b634",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "db17bcb5aaf60f49",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Файловый менеджер"
+            }
+          },
+          {
+            "id": "bf42482acd06a8ac",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "tag:#базы",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Поиск"
+            }
+          },
+          {
+            "id": "b9a77424043ccb0e",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-bookmark",
+              "title": "Закладки"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "d77309d581e34c5e",
+    "type": "split",
+    "children": [
+      {
+        "id": "0c26b0b8ee96a3d7",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "561d358b812e0144",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Обратные ссылки"
+            }
+          },
+          {
+            "id": "1cfe804cb76ba7ef",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Исходящие ссылки"
+            }
+          },
+          {
+            "id": "a25f09df2b301758",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Теги"
+            }
+          },
+          {
+            "id": "cf69a08c8ced06a8",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Структура"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "bases:Создать новую базу": false,
+      "switcher:Меню быстрого перехода": false,
+      "graph:Граф": false,
+      "canvas:Создать новый холст": false,
+      "daily-notes:Сегодняшняя заметка": false,
+      "templates:Вставить шаблон": false,
+      "command-palette:Открыть палитру команд": false
+    }
+  },
+  "active": "70be1a212dfb687c",
+  "lastOpenFiles": [
+    "Google Таблица.md",
+    "Контрольный план.md",
+    "RAG-бот.md",
+    "Управление базой знаний.md",
+    "Расписание.md",
+    "База знаний.md",
+    "Тренер.md",
+    "Сотрудники.md",
+    "Сборные.md",
+    "Без названия.base",
+    "временного расписания.md",
+    "Без названия.canvas",
+    "Без названия 1.base",
+    "создайте ссылку.md",
+    "Добро пожаловать.md"
+  ]
+}
