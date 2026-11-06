@@ -1,0 +1,3 @@
+# Base dependencies for the Django and PostgreSQL setup (stage 1A).
+Django==5.2.19
+psycopg[binary]==3.3.8
