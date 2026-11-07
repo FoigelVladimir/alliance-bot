@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
 </head>
 <body class="min-h-screen bg-neutral-50 text-neutral-950">
+  {% if workspace_navigation %}{% include "workspace/navigation.html" %}{% endif %}
   {% block content %}{% endblock %}
   <script type="importmap">{{ import_map_json }}</script>
   <script type="module">import "alliance/api";</script>

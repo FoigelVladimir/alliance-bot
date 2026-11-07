@@ -2,6 +2,7 @@
 @source "../../templates";
 @source "../../accounts/templates";
 @source "../../support/templates";
+@source "../../workspace/static";
 @source "../../static/js";
 
 @theme {

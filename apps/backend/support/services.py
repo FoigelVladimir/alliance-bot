@@ -7,6 +7,7 @@ from django.utils import timezone
 from accounts.policies import has_work_access, profile_from_session, quarantine_incident
 from accounts.services import AccessError, lock_profiles
 from jobs.models import BackgroundTask
+from workspace.services import notify_assignment
 
 from .models import (
     Dialog, Draft, InboundRoute, Message, OutgoingAttempt, OutgoingResponse,
@@ -124,10 +125,11 @@ def take_ticket(session, ticket_id, operation_id, version):
         ticket.current_owner = actor
         ticket.assignment_version += 1
         ticket.save(update_fields=["current_owner", "assignment_version"])
-    TicketEvent.objects.create(
+    event = TicketEvent.objects.create(
         ticket=ticket, command=command, assignment_version=ticket.assignment_version, changed=changed,
         previous_owner_id=None if changed else actor.pk, new_owner_id=actor.pk,
     )
+    notify_assignment(event)
     return ticket, changed, False
 
 
@@ -250,8 +252,9 @@ def change_assignment(session, ticket_id, operation_id, version, action, target_
     ticket.assignment_version += 1
     ticket.save(update_fields=["current_owner", "assignment_version", "importance"])
     cancel_stale_responses(ticket)
-    TicketEvent.objects.create(
+    event = TicketEvent.objects.create(
         ticket=ticket, command=command, assignment_version=ticket.assignment_version,
         previous_owner_id=previous, new_owner_id=ticket.current_owner_id,
     )
+    notify_assignment(event)
     return ticket, False

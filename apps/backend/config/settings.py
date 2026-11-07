@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     "support.apps.SupportConfig",
     "jobs.apps.JobsConfig",
     "storage.apps.StorageConfig",
+    "workspace.apps.WorkspaceConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -53,7 +54,7 @@ TEMPLATES = [{
     "BACKEND": "django.template.backends.django.DjangoTemplates",
     "DIRS": [BASE_DIR / "templates"],
     "APP_DIRS": True,
-    "OPTIONS": {"context_processors": ["config.static_assets.assets"]},
+    "OPTIONS": {"context_processors": ["config.static_assets.assets", "workspace.queries.navigation"]},
 }]
 LANGUAGE_CODE = "ru"
 TIME_ZONE = "Europe/Moscow"

@@ -3,7 +3,6 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    path("", views.home, name="workspace-home"),
     path("auth/vk/start/", views.start, name="vk-start"),
     path("auth/vk/callback/", views.callback, name="vk-callback"),
     path("auth/vk/recovery/", views.recovery, name="leader-recovery"),
