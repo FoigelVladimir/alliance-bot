@@ -30,6 +30,7 @@ def snapshot_for_close(dialog, ticket, actor_id, responses, attempts):
                 "id": item.pk, "author_id": item.command.actor_id, "assignment_version": item.assignment_version,
                 "status": item.status, "failure_reason": item.failure_reason, "message_id": item.message_id,
                 "recovery_verification_required": item.recovery_verification_required,
+                "active_recovery_guard_id": item.recovery_guards.filter(resolved_at__isnull=True).values_list("pk", flat=True).first(),
             } for item in responses
         ],
         "attempts": [
@@ -46,7 +47,8 @@ def snapshot_for_close(dialog, ticket, actor_id, responses, attempts):
 
 def warning_for(snapshot, version):
     failed = {item["id"] for item in snapshot["responses"]
-              if item["status"] == Response.Status.FAILED and item["assignment_version"] == version}
+              if item["status"] == Response.Status.FAILED and item["assignment_version"] == version
+              and not item["recovery_verification_required"]}
     running = {item["response_id"] for item in snapshot["attempts"] if item["status"] == Attempt.Status.IN_FLIGHT}
     unknown = {item["response_id"] for item in snapshot["attempts"] if item["status"] == Attempt.Status.UNKNOWN}
     unknown.update(item["id"] for item in snapshot["responses"]

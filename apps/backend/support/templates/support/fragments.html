@@ -189,24 +189,9 @@
               <p>Ответ в очереди на отправку.</p>
             {% elif response.status == "unknown_outcome" %}
               <p class="font-semibold">Результат отправки неизвестен. Повтор заблокирован до сверки.</p>
-              {% if check and check.status != "finished" %}
-                <p class="mt-2 text-sm">Проверка поставлена в очередь или уже идёт.</p>
-              {% else %}
-                {% if check and check.outcome == "unresolved" %}
-                  <p class="mt-2 text-sm">Проверка не нашла достаточного подтверждения.</p>
-                {% endif %}
-                {% if can_reconcile and not response.recovery_verification_required %}
-                  <form class="mt-3" action="{% url 'support-reconcile' response.pk %}" method="post" data-support-command>
-                    {% csrf_token %}
-                    <input type="hidden" name="client_operation_id" value="{{ operation_id }}">
-                    <button class="font-semibold underline" type="submit">Проверить историю ВК</button>
-                    <p class="text-sm text-red-800" data-command-error role="alert"></p>
-                  </form>
-                {% endif %}
-              {% endif %}
             {% elif response.status == "failed" %}
               <p>Ответ не отправлен.</p>
-              {% if can_send and response.assignment_version == ticket.assignment_version and not response.recovery_verification_required %}
+              {% if can_send and response.assignment_version == ticket.assignment_version %}
                 <form class="mt-3" action="{% url 'support-retry' response.pk %}" method="post" data-support-command>
                   {% csrf_token %}
                   <input type="hidden" name="client_operation_id" value="{{ operation_id }}">
@@ -217,6 +202,23 @@
               {% endif %}
             {% else %}
               <p>Отправка отменена.</p>
+            {% endif %}
+            {% if response.recovery_verification_required or response.status == "unknown_outcome" %}
+              {% if check and check.status != "finished" %}
+                <p class="mt-2 text-sm">Проверка поставлена в очередь или уже идёт.</p>
+              {% else %}
+                {% if check and check.outcome == "unresolved" %}
+                  <p class="mt-2 text-sm">Проверка не нашла достаточного подтверждения.</p>
+                {% endif %}
+                {% if can_reconcile %}
+                  <form class="mt-3" action="{% url 'support-reconcile' response.pk %}" method="post" data-support-command>
+                    {% csrf_token %}
+                    <input type="hidden" name="client_operation_id" value="{{ operation_id }}">
+                    <button class="font-semibold underline" type="submit">Проверить историю ВК</button>
+                    <p class="text-sm text-red-800" data-command-error role="alert"></p>
+                  </form>
+                {% endif %}
+              {% endif %}
             {% endif %}
           </div>
         {% endfor %}

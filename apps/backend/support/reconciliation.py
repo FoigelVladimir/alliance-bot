@@ -10,10 +10,11 @@ from vk_channel.backfill import HistoryQuotaExceeded, use_history_quota
 from vk_channel.client import DeliveryUnknown
 from vk_channel.services import database_now
 
-from .delivery import lock_delivery, record_outcome
+from .delivery import record_outcome
 from .models import (
+    Dialog, Message,
     OutgoingAttempt as Attempt, OutgoingReconciliation as Check, OutgoingResponse as Response,
-    ReconciliationEvidence, Ticket,
+    ReconciliationEvidence, ResponseRecoveryGuard as Guard, Ticket,
 )
 from .queries import allowed_communities, may_coordinate
 from .services import reserve_command, support_actor
@@ -44,31 +45,47 @@ def request_reconciliation(session, response_id, operation_id):
     command, created = reserve_command(actor, operation_id, "reconcile_response", "response", response.pk, {})
     if not created:
         return Check.objects.get(command=command), True
-    if response.recovery_verification_required:
-        code = "reconciliation_state_inconsistent" if response.status == Response.Status.UNKNOWN else "recovery_verification_required"
-        raise AccessError(code, 409)
-    if response.status != Response.Status.UNKNOWN:
-        raise AccessError("reconciliation_not_required", 409)
+    guard = Guard.objects.select_for_update().filter(response=response, resolved_at__isnull=True).first()
     attempt = Attempt.objects.select_for_update().filter(response=response, status=Attempt.Status.UNKNOWN).first()
-    if attempt is None:
+    if (bool(guard) != response.recovery_verification_required
+            or (guard and (attempt or response.status != Response.Status.FAILED))
+            or (not guard and response.status == Response.Status.UNKNOWN and attempt is None)):
         raise AccessError("reconciliation_state_inconsistent", 409)
+    if guard is None and (response.status != Response.Status.UNKNOWN or attempt is None):
+        raise AccessError("reconciliation_not_required", 409)
     if Check.objects.filter(response=response).exclude(status=Check.Status.FINISHED).exists():
         raise AccessError("reconciliation_in_progress", 409)
-    task = enqueue(TASK_TYPE, operation_id, {"attempt_id": attempt.pk})
+    task = enqueue(TASK_TYPE, operation_id, {"recovery_guard_id": guard.pk} if guard else {"attempt_id": attempt.pk})
     return Check.objects.create(
-        response=response, command=command, target_attempt=attempt, task=task,
+        response=response, command=command, target_attempt=None if guard else attempt, target_recovery_guard=guard, task=task,
         lookup_deadline_at=database_now() + LOOKUP_WINDOW,
     ), False
 
 
 def lock_check(task_id):
-    outbound_id = Check.objects.filter(task_id=task_id).values_list("target_attempt__task_id", flat=True).get()
-    ticket, response, attempt = lock_delivery(outbound_id)
+    response_id, ticket_id, dialog_id = Check.objects.filter(task_id=task_id).values_list(
+        "response_id", "response__ticket_id", "response__ticket__dialog_id",
+    ).get()
+    Dialog.objects.select_for_update().get(pk=dialog_id)
+    ticket = Ticket.objects.select_for_update().get(pk=ticket_id)
+    response = Response.objects.select_for_update().get(pk=response_id)
+    target_attempt_id, guard_id = Check.objects.filter(task_id=task_id).values_list(
+        "target_attempt_id", "target_recovery_guard_id",
+    ).get()
+    target = (Guard.objects.select_for_update().get(pk=guard_id) if guard_id
+              else Attempt.objects.select_for_update().get(pk=target_attempt_id))
     check = Check.objects.select_for_update().get(task_id=task_id)
-    return ticket, response, attempt, check
+    return ticket, response, target, check
 
 
 def target_is_current(response, attempt, check):
+    if check.target_recovery_guard_id:
+        return (
+            attempt.pk == check.target_recovery_guard_id and attempt.response_id == response.pk == check.response_id
+            and attempt.resolved_at is None and response.recovery_verification_required
+            and response.status == Response.Status.FAILED
+            and not response.attempts.filter(status__in=[Attempt.Status.IN_FLIGHT, Attempt.Status.UNKNOWN]).exists()
+        )
     return (
         attempt.response_id == response.pk == check.response_id
         and attempt.pk == check.target_attempt_id
@@ -102,7 +119,10 @@ def begin_lookup(task, community_id):
         renew(task)
         check.status = Check.Status.RUNNING
         check.save(update_fields=["status"])
-        return dialog.vk_peer_id, response.vk_random_id, response.text, attempt.started_at
+        since = (response.command.created_at
+                 if check.target_recovery_guard_id or attempt.failure_reason == "recovered_from_backup"
+                 else attempt.started_at)
+        return dialog.vk_peer_id, response.vk_random_id, response.text, since
     finish_check(check, Check.Outcome.UNRESOLVED, reason)
     finish(task, {"reason": reason})
     return None
@@ -131,35 +151,88 @@ def complete_lookup(task, evidence, reason):
     ticket, response, attempt, check = lock_check(task.pk)
     if check.status != Check.Status.RUNNING:
         raise LeaseLost(task.pk)
-    jobs = {
-        job.pk: job for job in Task.objects.select_for_update().filter(pk__in=[task.pk, attempt.task_id]).order_by("pk")
-    }
-    outgoing = jobs[attempt.task_id]
-    if not target_is_current(response, attempt, check) or outgoing.status != Task.Status.UNKNOWN:
+    recovery = bool(check.target_recovery_guard_id)
+    job_ids = [task.pk] if recovery else [task.pk, attempt.task_id]
+    jobs = {job.pk: job for job in Task.objects.select_for_update().filter(pk__in=job_ids).order_by("pk")}
+    outgoing = None if recovery else jobs[attempt.task_id]
+    if not target_is_current(response, attempt, check) or (outgoing and (
+        outgoing.status != Task.Status.UNKNOWN or outgoing.task_type != "support.send_response"
+        or outgoing.payload != {"response_id": response.pk, "attempt_id": attempt.pk}
+    )):
         evidence, reason = None, "target_changed"
     elif quarantine_incident():
         evidence, reason = None, "history_unavailable"
     elif check.lookup_deadline_at <= database_now():
         evidence, reason = None, "lookup_budget_exhausted"
-    elif evidence and Response.objects.filter(
+    elif evidence and evidence.get("message_id") and Response.objects.filter(
         ticket__dialog_id=ticket.dialog_id, provider_message_id=evidence["message_id"],
     ).exclude(pk=response.pk).exists():
         evidence, reason = None, "no_unique_match"
 
     outcome = Check.Outcome.UNRESOLVED
     if evidence:
-        ReconciliationEvidence.objects.create(
-            reconciliation=check, source_kind="vk_history", rule_version=1,
+        outcome = Check.Outcome.NOT_SENT if evidence.get("not_sent") else Check.Outcome.ACCEPTED
+        if outcome == Check.Outcome.NOT_SENT:
+            evidence = None if recovery else local_non_admission(response, attempt)
+            if not evidence:
+                reason, outcome = "no_unique_match", Check.Outcome.UNRESOLVED
+        elif recovery:
+            evidence = {**evidence, "recovery_run_id": str(attempt.recovery_run_id),
+                        "interval_start": response.command.created_at.isoformat(),
+                        "interval_end": database_now().isoformat(), "coverage_basis": "unique_correlated_message"}
+    if evidence:
+        proof = ReconciliationEvidence.objects.create(
+            reconciliation=check, source_kind="local_non_admission" if outcome == Check.Outcome.NOT_SENT else "vk_history", rule_version=1,
             observed_at=database_now(), facts=evidence,
         )
-        record_outcome(ticket, response, attempt, Attempt.Status.SUCCEEDED, provider_id=evidence["message_id"])
-        outgoing.status = Task.Status.DONE
-        outgoing.result = {"attempt_id": attempt.pk, "reconciliation_id": check.pk}
-        outgoing.updated_at = database_now()
-        outgoing.save(update_fields=["status", "result", "updated_at"])
-        outcome = Check.Outcome.ACCEPTED
+        if recovery:
+            response.message = Message.objects.create(
+                ticket=ticket, dialog_id=ticket.dialog_id, direction="outbound_manager", text=response.text,
+            )
+            response.status, response.provider_message_id = Response.Status.SENT, evidence["message_id"]
+            response.confirmed_sent_at, response.recovery_verification_required = database_now(), False
+            response.failure_reason = ""
+            response.save(update_fields=["message", "status", "provider_message_id", "confirmed_sent_at", "recovery_verification_required", "failure_reason"])
+            attempt.resolved_at, attempt.resolution, attempt.evidence_ref = database_now(), outcome, proof
+            attempt.save(update_fields=["resolved_at", "resolution", "evidence_ref"])
+        else:
+            status = Attempt.Status.FAILED if outcome == Check.Outcome.NOT_SENT else Attempt.Status.SUCCEEDED
+            record_outcome(ticket, response, attempt, status, provider_id=evidence.get("message_id"),
+                           reason="not_sent_verified" if outcome == Check.Outcome.NOT_SENT else "")
+            outgoing.status = Task.Status.FAILED if outcome == Check.Outcome.NOT_SENT else Task.Status.DONE
+            outgoing.result = {"attempt_id": attempt.pk, "reconciliation_id": check.pk}
+            outgoing.updated_at = database_now()
+            outgoing.save(update_fields=["status", "result", "updated_at"])
     finish_check(check, outcome, reason)
     finish(task, {"reconciliation_id": check.pk, "outcome": outcome})
+
+
+def local_non_admission(response, attempt):
+    """Negative proof is unavailable for any logical response touched by restoration."""
+    if response.recovery_guards.exists() or response.attempts.filter(failure_reason="recovered_from_backup").exists():
+        return None
+    calls = list(response.attempts.select_related("task").order_by("pk"))
+    if not calls or any(item.started_at is not None or item.task.admitted_at is not None for item in calls):
+        return None
+    if any(item.pk != attempt.pk and (
+        item.status != Attempt.Status.FAILED or item.task.status not in (Task.Status.FAILED, Task.Status.DEAD)
+    ) for item in calls):
+        return None
+    return {"not_sent": True, "response_id": response.pk, "attempt_ids": [item.pk for item in calls],
+            "task_ids": [item.task_id for item in calls], "no_external_admission": True}
+
+
+@transaction.atomic
+def complete_local_lookup(task):
+    _, response, target, check = lock_check(task.pk)
+    if check.target_recovery_guard_id or not target_is_current(response, target, check):
+        return False
+    list(Task.objects.select_for_update().filter(pk__in=[task.pk, target.task_id]).order_by("pk"))
+    proof = local_non_admission(response, target)
+    if not proof:
+        return False
+    complete_lookup(task, proof, "")
+    return True
 
 
 @transaction.atomic
@@ -191,7 +264,7 @@ def recover_expired_lookup():
     return True
 
 
-def run_reconciliation_once(community_id, read_history):
+def run_reconciliation_once(community_id, read_history=None):
     while recover_expired_lookup():
         pass
     task = claim([TASK_TYPE])
@@ -199,8 +272,11 @@ def run_reconciliation_once(community_id, read_history):
         return False
     try:
         parameters = begin_lookup(task, community_id)
-        if parameters is not None:
+        if parameters is not None and not complete_local_lookup(task):
             peer_id, random_id, text, started_at = parameters
+            if read_history is None:
+                complete_lookup(task, None, "history_unavailable")
+                return True
             try:
                 use_history_quota(community_id)
                 items = read_history(peer_id)

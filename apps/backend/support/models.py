@@ -210,6 +210,7 @@ class OutgoingResponse(models.Model):
     source_draft_id_snapshot = models.PositiveBigIntegerField(null=True)
     source_draft_revision = models.PositiveBigIntegerField(null=True)
     recovery_verification_required = models.BooleanField(default=False)
+    confirmed_sent_at = models.DateTimeField(null=True)
     failure_reason = models.CharField(max_length=48, blank=True)
 
     class Meta:
@@ -264,6 +265,38 @@ class OutgoingAttempt(models.Model):
         ]
 
 
+class DeliveryRecoveryRun(models.Model):
+    id = models.UUIDField(primary_key=True)
+    incident = models.CharField(max_length=128)
+    created_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True)
+
+
+class ResponseRecoveryGuard(models.Model):
+    response = models.ForeignKey(OutgoingResponse, on_delete=models.PROTECT, related_name="recovery_guards")
+    recovery_run = models.ForeignKey(DeliveryRecoveryRun, on_delete=models.PROTECT)
+    opened_at = models.DateTimeField(default=timezone.now)
+    resolved_at = models.DateTimeField(null=True)
+    resolution = models.CharField(max_length=24, null=True)
+    evidence_ref = models.ForeignKey("ReconciliationEvidence", null=True, on_delete=models.PROTECT)
+    resolved_by = models.ForeignKey("accounts.StaffProfile", null=True, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["response", "recovery_run"], name="support_guard_response_run"),
+            models.UniqueConstraint(
+                fields=["response"], condition=Q(resolved_at__isnull=True), name="support_one_active_recovery_guard",
+            ),
+            models.CheckConstraint(
+                condition=Q(resolved_at__isnull=True, resolution__isnull=True, evidence_ref__isnull=True)
+                | Q(resolved_at__isnull=False, resolution__isnull=False, resolution="superseded", evidence_ref__isnull=True)
+                | Q(resolved_at__isnull=False, resolution__isnull=False, resolution__in=["accepted_by_vk", "not_sent_verified"],
+                    evidence_ref__isnull=False),
+                name="support_guard_resolution",
+            ),
+        ]
+
+
 class OutgoingReconciliation(models.Model):
     class Status(models.TextChoices):
         QUEUED = "queued"
@@ -272,11 +305,13 @@ class OutgoingReconciliation(models.Model):
 
     class Outcome(models.TextChoices):
         ACCEPTED = "accepted_by_vk"
+        NOT_SENT = "not_sent_verified"
         UNRESOLVED = "unresolved"
 
     response = models.ForeignKey(OutgoingResponse, on_delete=models.PROTECT, related_name="reconciliations")
     command = models.OneToOneField(SupportCommand, on_delete=models.PROTECT)
-    target_attempt = models.ForeignKey(OutgoingAttempt, on_delete=models.PROTECT)
+    target_attempt = models.ForeignKey(OutgoingAttempt, null=True, on_delete=models.PROTECT)
+    target_recovery_guard = models.ForeignKey(ResponseRecoveryGuard, null=True, on_delete=models.PROTECT)
     task = models.OneToOneField("jobs.BackgroundTask", on_delete=models.PROTECT)
     status = models.CharField(max_length=8, choices=Status, default=Status.QUEUED)
     outcome = models.CharField(max_length=24, choices=Outcome, blank=True)
@@ -293,8 +328,13 @@ class OutgoingReconciliation(models.Model):
             ),
             models.CheckConstraint(
                 condition=Q(status__in=["queued", "running"], outcome="", finished_at__isnull=True)
-                | Q(status="finished", outcome__in=["accepted_by_vk", "unresolved"], finished_at__isnull=False),
+                | Q(status="finished", outcome__in=["accepted_by_vk", "not_sent_verified", "unresolved"], finished_at__isnull=False),
                 name="support_reconciliation_outcome",
+            ),
+            models.CheckConstraint(
+                condition=Q(target_attempt__isnull=False, target_recovery_guard__isnull=True)
+                | Q(target_attempt__isnull=True, target_recovery_guard__isnull=False),
+                name="support_reconciliation_one_target",
             ),
         ]
 

@@ -28,7 +28,10 @@ def assert_assignment(ticket, actor, version, *, replay=False):
 
 def create_attempt(response, command, kind):
     task = enqueue(TASK_TYPE, command.client_operation_id, {"response_id": response.pk})
-    return Attempt.objects.create(response=response, command=command, task=task, attempt_type=kind)
+    attempt = Attempt.objects.create(response=response, command=command, task=task, attempt_type=kind)
+    task.payload = {"response_id": response.pk, "attempt_id": attempt.pk}
+    task.save(update_fields=["payload"])
+    return attempt
 
 
 @transaction.atomic
@@ -104,6 +107,7 @@ def record_outcome(ticket, response, attempt, status, *, provider_id=None, reaso
     attempt.vk_error_code = error_code
     if status == Attempt.Status.SUCCEEDED:
         response.status = Response.Status.SENT
+        response.confirmed_sent_at = database_now()
         response.provider_message_id = provider_id
         response.message = Message.objects.create(
             ticket=ticket, dialog_id=ticket.dialog_id, direction="outbound_manager", text=response.text,
@@ -119,7 +123,7 @@ def record_outcome(ticket, response, attempt, status, *, provider_id=None, reaso
         response.status = Response.Status.FAILED
     attempt.save(update_fields=["status", "finished_at", "failure_reason", "vk_error_code"])
     response.failure_reason = reason
-    response.save(update_fields=["status", "message", "provider_message_id", "failure_reason"])
+    response.save(update_fields=["status", "message", "provider_message_id", "failure_reason", "confirmed_sent_at"])
 
 
 @transaction.atomic
