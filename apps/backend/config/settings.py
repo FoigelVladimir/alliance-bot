@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "jobs.apps.JobsConfig",
     "storage.apps.StorageConfig",
     "workspace.apps.WorkspaceConfig",
+    "knowledge.apps.KnowledgeConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

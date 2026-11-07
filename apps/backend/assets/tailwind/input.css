@@ -3,6 +3,7 @@
 @source "../../accounts/templates";
 @source "../../support/templates";
 @source "../../workspace/static";
+@source "../../knowledge/templates";
 @source "../../static/js";
 
 @theme {

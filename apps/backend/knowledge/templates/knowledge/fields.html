@@ -1,0 +1,9 @@
+<label class="mt-4 block font-semibold" for="material-title">Название</label>
+<input class="mt-2 block min-h-12 w-full rounded-lg border border-neutral-400 p-3" id="material-title" name="title" maxlength="200" value="{{ form_values.title }}" required>
+<label class="mt-4 block font-semibold" for="material-description">Описание</label>
+<textarea class="mt-2 block w-full rounded-lg border border-neutral-400 p-3" id="material-description" name="description" maxlength="2000" rows="2">{{ form_values.description }}</textarea>
+<label class="mt-4 block font-semibold" for="material-tags">Метки через запятую</label>
+<input class="mt-2 block min-h-12 w-full rounded-lg border border-neutral-400 p-3" id="material-tags" name="tags" value="{{ form_values.tags }}">
+<label class="mt-4 block font-semibold" for="material-text">Текст источника</label>
+<textarea class="mt-2 block w-full rounded-lg border border-neutral-400 p-3 text-base" id="material-text" name="source_text" rows="12" aria-describedby="material-text-limit">{{ form_values.source_text }}</textarea>
+<p class="mt-2 text-sm text-neutral-600" id="material-text-limit">До 64 КиБ UTF-8. Проверьте факты и уберите персональные сведения перед дальнейшей подготовкой.</p>
