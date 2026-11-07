@@ -17,6 +17,7 @@
 *.db
 
 # Dependencies, caches and build output
+/apps/backend/static/css/app.css
 node_modules/
 .venv/
 venv/

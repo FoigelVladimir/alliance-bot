@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block head %}<meta name="referrer" content="strict-origin">{% endblock %}
+{% block title %}Кабинет сотрудников · Альянс{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-2xl px-6 py-16">
+  <p class="text-sm font-semibold text-neutral-600">Спортивный клуб «Альянс»</p>
+  {% if recovery %}
+    <h1 class="mt-2 text-balance text-4xl font-semibold tracking-tight">Восстановление входа руководителя</h1>
+    {% if recovery_code %}
+      <p class="mt-4">Подтвердите новый аккаунт ВК, чтобы ответственный мог восстановить вход.</p>
+      <form class="mt-6" action="{% url 'leader-recovery' %}" method="post">
+        {% csrf_token %}
+        <input type="hidden" name="recovery_code" value="{{ recovery_code }}">
+        <button class="bg-neutral-950 px-4 py-2 font-semibold text-white" type="submit">Подтвердить аккаунт ВК</button>
+      </form>
+    {% else %}
+      <p class="mt-4">Аккаунт ВК подтверждён. Сообщите ответственному за восстановление.</p>
+    {% endif %}
+  {% elif review %}
+    <h1 class="mt-2 text-balance text-4xl font-semibold tracking-tight">Сотрудники</h1>
+    <a class="underline" href="{% url 'workspace-home' %}">Вернуться в кабинет</a>
+    <h2 class="mt-8 text-xl font-semibold">Заявки на доступ</h2>
+    {% for entry, approve_id, reject_id in application_rows %}
+      <section class="mt-4 border-t border-neutral-300 py-4">
+        <h3 class="font-semibold">{{ entry.profile.display_name|default:"Сотрудник" }} · профиль {{ entry.profile_id }}</h3>
+        <p class="mt-2 whitespace-pre-wrap">{{ entry.club_activity }}</p>
+        {% if entry.status == "pending" %}
+          <p class="mt-2">Перед решением подтвердите личность по известному контакту клуба.</p>
+          <form class="mt-3" action="{% url 'staff-approve' entry.pk %}" method="post">
+            {% csrf_token %}
+            <input type="hidden" name="client_operation_id" value="{{ approve_id }}">
+            <input type="hidden" name="expected_identity_version" value="{{ entry.profile.identity_version }}">
+            <label>Роль
+              <select name="role" class="border border-neutral-400">
+                <option value="manager">Менеджер</option>
+                {% if "administrator" in roles %}<option value="administrator">Администратор</option>{% endif %}
+              </select>
+            </label>
+            <button class="underline" type="submit">Одобрить</button>
+          </form>
+          <form class="mt-3" action="{% url 'staff-reject' entry.pk %}" method="post">
+            {% csrf_token %}
+            <input type="hidden" name="client_operation_id" value="{{ reject_id }}">
+            <input type="hidden" name="expected_identity_version" value="{{ entry.profile.identity_version }}">
+            <label>Пояснение для заявителя
+              <input class="border border-neutral-400" name="applicant_message" maxlength="1000">
+            </label>
+            <button class="underline" type="submit">Отклонить</button>
+          </form>
+        {% elif entry.status == "approved" %}
+          <p>Одобрена</p>
+        {% else %}
+          <p>Отклонена</p>
+        {% endif %}
+      </section>
+    {% empty %}
+      <p class="mt-4">Заявок пока нет.</p>
+    {% endfor %}
+    {% if staff_rows %}
+      <h2 class="mt-8 text-xl font-semibold">Рабочий допуск</h2>
+      {% for employee, state_label, actions in staff_rows %}
+        <section class="mt-4 border-t border-neutral-300 py-4">
+          <h3 class="font-semibold">{{ employee.display_name|default:"Сотрудник" }} · профиль {{ employee.pk }}</h3>
+          <p>{{ state_label }}</p>
+          {% for action, label, operation_id in actions %}
+            <form class="mt-3" action="{% url 'staff-change-access' employee.pk %}" method="post">
+              {% csrf_token %}
+              <input type="hidden" name="client_operation_id" value="{{ operation_id }}">
+              <input type="hidden" name="expected_access_version" value="{{ employee.access_version }}">
+              <input type="hidden" name="action" value="{{ action }}">
+              {% if action == "block" or action == "revoke_access" %}
+                <label><input type="checkbox" required> Подтверждаю, что {{ employee.display_name|default:"этот сотрудник" }} потеряет рабочий доступ.</label>
+              {% endif %}
+              <button class="underline" type="submit">{{ label }}</button>
+            </form>
+          {% endfor %}
+        </section>
+      {% endfor %}
+    {% endif %}
+  {% else %}
+    <h1 class="mt-2 text-balance text-4xl font-semibold tracking-tight">Кабинет сотрудников</h1>
+    {% if profile %}
+      {% if profile.photo_url %}
+        <img class="mt-4 size-12 rounded-full" src="{{ profile.photo_url }}" alt="" referrerpolicy="no-referrer" width="48" height="48">
+      {% endif %}
+      <p class="mt-4">{{ profile.display_name|default:"Сотрудник" }} · профиль {{ profile.pk }}</p>
+      {% if profile.blocked_at %}
+        <p class="mt-4">Доступ заблокирован. Обратитесь к руководителю.</p>
+      {% elif work_access %}
+        <p class="mt-4">Рабочий доступ открыт.</p>
+        {% if support_access %}<a class="mt-3 inline-block underline" href="{% url 'support-queue' %}">Поддержка</a>{% endif %}
+        {% if can_review %}<a class="mt-3 inline-block underline" href="{% url 'staff-applications' %}">Сотрудники</a>{% endif %}
+      {% elif profile.access_state == "revoked" %}
+        <p class="mt-4">Рабочий доступ отозван. Обратитесь к руководителю.</p>
+      {% elif application.status == "pending" %}
+        <p class="mt-4">Ваша заявка на рассмотрении.</p>
+      {% elif application.status == "rejected" %}
+        <p class="mt-4">Доступ не предоставлен.</p>
+        {% if application.applicant_message %}<p class="mt-2 whitespace-pre-wrap">{{ application.applicant_message }}</p>{% endif %}
+        {% if retry_at %}<p class="mt-2">Повторная подача доступна с {{ retry_at|date:"j E, H:i" }} по Москве.</p>{% endif %}
+      {% endif %}
+      {% if can_apply %}
+        <form class="mt-6" action="{% url 'access-application' %}" method="post">
+          {% csrf_token %}
+          <input type="hidden" name="client_operation_id" value="{{ operation_id }}">
+          <label class="block font-semibold" for="activity">Чем вы занимаетесь в клубе?</label>
+          <textarea class="mt-2 block w-full border border-neutral-400 p-2" id="activity" name="club_activity" maxlength="1000" rows="3"></textarea>
+          <button class="mt-4 bg-neutral-950 px-4 py-2 font-semibold text-white" type="submit">Подать заявку</button>
+        </form>
+      {% endif %}
+      <form class="mt-6" action="{% url 'staff-logout' %}" method="post">
+        {% csrf_token %}<button class="underline" type="submit">Выйти</button>
+      </form>
+    {% else %}
+      <p class="mt-4 text-neutral-700">Войдите, чтобы подать заявку на рабочий доступ или открыть кабинет.</p>
+      {% if login_error %}<p class="mt-4" role="alert">{{ login_error }}</p>{% endif %}
+      <form class="mt-6" action="{% url 'vk-start' %}" method="post">
+        {% csrf_token %}<button class="bg-neutral-950 px-4 py-2 font-semibold text-white" type="submit">Войти через ВК</button>
+      </form>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

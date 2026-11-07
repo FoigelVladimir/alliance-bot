@@ -1,0 +1,31 @@
+from django.urls import path
+
+from . import views
+
+urlpatterns = [
+    path("attachments/<int:attachment_id>/prepare/", views.prepare_attachment, name="support-attachment-prepare"),
+    path("attachments/<int:attachment_id>/state/", views.attachment_state, name="support-attachment-state"),
+    path("attachments/<int:attachment_id>/content/", views.attachment_content, name="support-attachment-content"),
+    path("attachments/<int:attachment_id>/download/", views.attachment_content, {"download": True},
+         name="support-attachment-download"),
+    path("", views.queue, name="support-queue"),
+    path("fragments/tickets/", views.queue_fragment, name="support-queue-fragment"),
+    path("review/<int:route_id>/", views.review_detail, name="support-review"),
+    path("review/<int:route_id>/route/", views.resolve_review, {"action": "route_to_support"}, name="support-route"),
+    path("review/<int:route_id>/dismiss/", views.resolve_review, {"action": "dismiss_review"}, name="support-dismiss"),
+    path("tickets/<int:ticket_id>/", views.ticket_detail, name="support-ticket"),
+    path("tickets/<int:ticket_id>/state/", views.ticket_state, name="support-ticket-state"),
+    path("tickets/<int:ticket_id>/fragments/header/", views.header_fragment, name="support-header-fragment"),
+    path("tickets/<int:ticket_id>/fragments/history/", views.history_fragment, name="support-history-fragment"),
+    path("tickets/<int:ticket_id>/take/", views.take, name="support-take"),
+    path("tickets/<int:ticket_id>/takeover/", views.reassign, {"action": "takeover"}, name="support-takeover"),
+    path("tickets/<int:ticket_id>/return/", views.reassign, {"action": "return_to_queue"}, name="support-return"),
+    path("tickets/<int:ticket_id>/reassign/", views.reassign, {"action": "reassign_coordinator"}, name="support-reassign"),
+    path("tickets/<int:ticket_id>/reassign-targets/", views.reassign_targets, name="support-reassign-targets"),
+    path("tickets/<int:ticket_id>/close/", views.close, name="support-close"),
+    path("tickets/<int:ticket_id>/draft/", views.draft, name="support-draft"),
+    path("tickets/<int:ticket_id>/send/", views.send, name="support-send"),
+    path("responses/<int:response_id>/retry/", views.retry, name="support-retry"),
+    path("responses/<int:response_id>/reconcile/", views.reconcile, name="support-reconcile"),
+    path("responses/<int:response_id>/state/", views.response_state, name="support-response-state"),
+]

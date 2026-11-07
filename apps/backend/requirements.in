@@ -1,0 +1,6 @@
+# Base dependencies for the Django and PostgreSQL setup (stage 1A).
+Django==5.2.19
+psycopg[binary]==3.3.8
+
+# Bounded decoding of support image attachments (stage 1В).
+Pillow==13.0.0

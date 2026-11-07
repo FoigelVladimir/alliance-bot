@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Поддержка · Альянс{% endblock %}
+{% block content %}
+<p class="mx-auto max-w-4xl px-6 pt-4 text-sm" data-poll-status role="status" hidden></p>
+<main class="mx-auto max-w-4xl px-6 py-12" data-queue-url="{% url 'support-queue-fragment' %}">
+  <a class="text-sm font-semibold underline" href="{% url 'workspace-home' %}">Кабинет сотрудников</a>
+  <h1 class="mt-3 text-balance text-4xl font-semibold tracking-tight">Поддержка</h1>
+  <nav class="mt-6 flex flex-wrap gap-4" aria-label="Очередь обращений">
+    <a class="underline" href="{% url 'support-queue' %}" {% if view == "queue" %}aria-current="page"{% endif %}>Свободные</a>
+    <a class="underline" href="?view=mine&amp;q={{ query|urlencode }}" {% if view == "mine" %}aria-current="page"{% endif %}>Мои обращения</a>
+    <a class="underline" href="?view=open&amp;q={{ query|urlencode }}" {% if view == "open" %}aria-current="page"{% endif %}>Все открытые</a>
+    <a class="underline" href="?view=closed&amp;q={{ query|urlencode }}" {% if view == "closed" %}aria-current="page"{% endif %}>Закрытые</a>
+    <a class="underline" href="#review">Требует разбора</a>
+  </nav>
+  <form class="mt-6" action="{% url 'support-queue' %}" method="get">
+    <input type="hidden" name="view" value="{{ view }}">
+    <label for="ticket-query">Текст сообщения или номер обращения</label>
+    <input class="mt-2 border border-neutral-400 p-2" type="search" name="q" id="ticket-query" value="{{ query }}" maxlength="200">
+    <button class="ml-2 font-semibold underline" type="submit">Найти</button>
+  </form>
+  {% include "support/fragments.html" with fragment="queue" %}
+</main>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% static 'support/workspace.js' %}"></script>
+{% endblock %}

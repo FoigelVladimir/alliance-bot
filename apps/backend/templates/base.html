@@ -1,0 +1,17 @@
+{% load static %}
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% block head %}{% endblock %}
+  <title>{% block title %}Альянс{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+</head>
+<body class="min-h-screen bg-neutral-50 text-neutral-950">
+  {% block content %}{% endblock %}
+  <script type="importmap">{{ import_map_json }}</script>
+  <script type="module">import "alliance/api";</script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

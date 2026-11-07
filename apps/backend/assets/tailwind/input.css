@@ -1,0 +1,9 @@
+@import "tailwindcss" source(none);
+@source "../../templates";
+@source "../../accounts/templates";
+@source "../../support/templates";
+@source "../../static/js";
+
+@theme {
+  --font-sans: Manrope, system-ui, sans-serif;
+}

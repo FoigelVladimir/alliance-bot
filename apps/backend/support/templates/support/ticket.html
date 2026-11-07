@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% load support_attachments %}
+{% load static l10n %}
+{% block title %}Обращение · Альянс{% endblock %}
+{% block content %}
+<p class="mx-auto max-w-4xl px-6 pt-4 text-sm" data-poll-status role="status" hidden></p>
+<main class="mx-auto max-w-4xl px-6 py-12"{% if ticket %} data-ticket-state-url="{% url 'support-ticket-state' ticket.pk %}" data-header-url="{% url 'support-header-fragment' ticket.pk %}" data-history-url="{% url 'support-history-fragment' ticket.pk %}"{% endif %}>
+  <a class="text-sm font-semibold underline" href="{% url 'support-queue' %}">Вернуться в поддержку</a>
+  {% if route %}
+    <h1 class="mt-3 text-balance text-4xl font-semibold tracking-tight">Разбор сообщения</h1>
+    <p class="mt-2 text-sm text-neutral-600">Диалог {{ route.dialog.vk_peer_id }} · {{ route.message.created_at|date:"j E, H:i" }}</p>
+    <section class="mt-6 border border-neutral-300 bg-white p-4">
+      <p class="whitespace-pre-wrap break-words">{{ route.message.text|default:"Сообщение без текста" }}</p>
+      {% support_attachments route.message %}
+    </section>
+    <form class="mt-6" action="{% url 'support-route' route.pk %}" method="post" data-support-command data-ticket-result>
+      {% csrf_token %}
+      <input type="hidden" name="client_operation_id" value="{{ route_operation_id }}">
+      <input type="hidden" name="expected_ticket_id" value="{% if current_ticket %}{{ current_ticket.pk|unlocalize }}{% endif %}">
+      {% if current_ticket %}
+        <label class="mb-3 block">
+          <input type="checkbox" required>
+          Подтверждаю, что это сообщение относится к открытому обращению <a class="underline" href="{% url 'support-ticket' current_ticket.pk %}">№{{ current_ticket.pk }}</a>.
+        </label>
+      {% endif %}
+      <button class="bg-neutral-950 px-4 py-2 font-semibold text-white" type="submit">{% if current_ticket %}Добавить к обращению{% else %}Передать в очередь{% endif %}</button>
+      <p class="mt-2 text-sm text-red-800" data-command-error role="alert"></p>
+    </form>
+    <details class="mt-6 border-t border-neutral-300 pt-4">
+      <summary class="cursor-pointer font-semibold">Ответ не требуется</summary>
+      <form class="mt-3" action="{% url 'support-dismiss' route.pk %}" method="post" data-support-command data-return-url="{% url 'support-queue' %}">
+        {% csrf_token %}
+        <input type="hidden" name="client_operation_id" value="{{ dismiss_operation_id }}">
+        <label for="dismiss-reason">Почему ответ не требуется?</label>
+        <textarea class="mt-2 block w-full border border-neutral-400 p-2" id="dismiss-reason" name="reason" maxlength="1000" rows="2" required></textarea>
+        <button class="mt-3 border border-neutral-400 px-4 py-2 font-semibold" type="submit">Сохранить решение</button>
+        <p class="mt-2 text-sm text-red-800" data-command-error role="alert"></p>
+      </form>
+    </details>
+  {% else %}
+    {% include "support/fragments.html" with fragment="header" %}
+    <p class="mt-3 text-sm" data-new-history hidden>Появились изменения в последних записях. <a class="underline" href="{% url 'support-ticket' ticket.pk %}">К последним записям</a></p>
+    {% include "support/fragments.html" %}
+    <section class="mt-8 border-t border-neutral-300 pt-6" data-editor-slot>
+      {% if can_send %}
+        <h2 class="text-balance text-2xl font-semibold">Ответ менеджера</h2>
+        {% include "support/fragments.html" with fragment="editor" %}
+      {% elif own_draft %}
+        <h2 class="font-semibold">Твой сохранённый черновик</h2>
+        <p class="mt-2 whitespace-pre-wrap break-words">{{ own_draft.text|default:"Черновик пуст." }}</p>
+      {% endif %}
+    </section>
+  {% endif %}
+</main>
+{% endblock %}
+{% block scripts %}
+<script type="module" src="{% static 'support/workspace.js' %}"></script>
+{% endblock %}

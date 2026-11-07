@@ -1,0 +1,28 @@
+{% if entries %}
+<ul class="mt-2 space-y-2 text-sm">
+  {% for entry in entries %}
+    <li data-attachment-key="{{ entry.data.id }}:{{ entry.data.state }}:{{ entry.data.reason }}">
+      <span class="font-semibold">{{ entry.label }}</span>
+      <p data-attachment-status role="status">{{ entry.status }}</p>
+      {% if "prepare" in entry.data.actions %}
+        <form action="{% url 'support-attachment-prepare' entry.data.id %}" method="post" data-support-command data-attachment-prepare>
+          {% csrf_token %}
+          <input type="hidden" name="client_operation_id" value="{{ entry.operation_id }}">
+          <button type="submit" class="underline">Подготовить файл</button>
+          <p data-command-error role="alert"></p>
+        </form>
+      {% endif %}
+      {% if "content" in entry.data.actions %}
+        {% if entry.is_audio %}
+          <a class="underline" href="{% url 'support-attachment-content' entry.data.id %}">Прослушать</a>
+        {% else %}
+          <a class="underline" href="{% url 'support-attachment-content' entry.data.id %}">Открыть фото</a>
+        {% endif %}
+      {% endif %}
+      {% if "download" in entry.data.actions %}
+        <a class="underline" href="{% url 'support-attachment-download' entry.data.id %}">Скачать</a>
+      {% endif %}
+    </li>
+  {% endfor %}
+</ul>
+{% endif %}
