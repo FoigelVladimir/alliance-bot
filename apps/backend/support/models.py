@@ -34,6 +34,10 @@ class Ticket(models.Model):
     closed_warning_ack = models.BooleanField(default=False)
     parent_ticket = models.ForeignKey("self", null=True, on_delete=models.SET_NULL, related_name="continuations")
     closed_by_vk_id = models.BigIntegerField(null=True)
+    handoff_reason = models.CharField(max_length=32, blank=True)
+    handoff_route = models.OneToOneField(
+        "InboundRoute", null=True, on_delete=models.PROTECT, related_name="handoff_ticket",
+    )
     closed_reason = models.CharField(max_length=32, blank=True)
 
     class Meta:
@@ -125,6 +129,7 @@ class InboundRoute(models.Model):
     sequence = models.PositiveBigIntegerField()
     mode_version = models.PositiveIntegerField()
     automation_epoch = models.PositiveBigIntegerField()
+    reply_to_cmid = models.BigIntegerField(null=True)
     historical = models.BooleanField(default=False)
     automation_paused = models.BooleanField(default=False)
     status = models.CharField(max_length=16, default="pending")
@@ -345,3 +350,179 @@ class ReconciliationEvidence(models.Model):
     rule_version = models.PositiveIntegerField()
     observed_at = models.DateTimeField()
     facts = models.JSONField()
+
+
+class AIRequest(models.Model):
+    dialog = models.ForeignKey(Dialog, on_delete=models.PROTECT)
+    mode_version = models.PositiveIntegerField()
+    automation_epoch = models.PositiveBigIntegerField()
+    request_version = models.PositiveIntegerField(default=1)
+    request_version_started_at = models.DateTimeField()
+    normalized_query = models.TextField()
+    status = models.CharField(max_length=30, default="pending")
+    created_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True)
+
+    class Meta:
+        db_table = "support_ai_request"
+
+
+class AIRequestMessage(models.Model):
+    request = models.ForeignKey(AIRequest, on_delete=models.PROTECT, related_name="message_links")
+    message = models.OneToOneField(Message, on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "support_ai_request_message"
+
+
+class AIProcessingRun(models.Model):
+    operation_id = models.UUIDField(unique=True)
+    dialog = models.ForeignKey(Dialog, on_delete=models.PROTECT)
+    task = models.OneToOneField("jobs.BackgroundTask", on_delete=models.PROTECT)
+    mode_version = models.PositiveIntegerField()
+    automation_epoch = models.PositiveBigIntegerField()
+    answer = models.OneToOneField("AIAnswer", null=True, on_delete=models.PROTECT)
+    handoff_ticket = models.ForeignKey(Ticket, null=True, on_delete=models.PROTECT)
+    status = models.CharField(max_length=16, default="running")
+    reason = models.CharField(max_length=40, blank=True)
+    sources_used = models.JSONField(default=list)
+    created_at = models.DateTimeField()
+    processing_deadline_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True)
+
+    class Meta:
+        db_table = "support_ai_processing_run"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(status="running", reason="", finished_at__isnull=True, answer__isnull=True)
+                | (Q(status="no_answer", finished_at__isnull=False, answer__isnull=True) & ~Q(reason=""))
+                | Q(status="answer_saved", reason="", finished_at__isnull=False, answer__isnull=False),
+                name="support_ai_run_outcome",
+            ),
+        ]
+
+
+class AIProcessingInput(models.Model):
+    run = models.ForeignKey(AIProcessingRun, on_delete=models.PROTECT, related_name="inputs")
+    request = models.ForeignKey(AIRequest, on_delete=models.PROTECT)
+    request_version = models.PositiveIntegerField()
+    question_text = models.TextField()
+    messages = models.ManyToManyField(Message, through="AIProcessingInputMessage")
+
+    class Meta:
+        db_table = "support_ai_processing_input"
+        constraints = [
+            models.UniqueConstraint(fields=["run", "request"], name="support_ai_unique_run_request"),
+        ]
+
+
+class AIProcessingInputMessage(models.Model):
+    processing_input = models.ForeignKey(AIProcessingInput, on_delete=models.PROTECT)
+    message = models.ForeignKey(Message, on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "support_ai_processing_input_message"
+        constraints = [
+            models.UniqueConstraint(fields=["processing_input", "message"], name="support_ai_unique_input_message"),
+        ]
+
+
+class AIAnswer(models.Model):
+    dialog = models.ForeignKey(Dialog, on_delete=models.PROTECT)
+    generation_operation_id = models.UUIDField(unique=True)
+    mode_version_snapshot = models.PositiveIntegerField()
+    model_snapshot = models.JSONField()
+    retrieval_snapshot = models.JSONField()
+    timings_snapshot = models.JSONField()
+    snapshot_schema_version = models.PositiveIntegerField(default=1)
+    content_sha256 = models.CharField(max_length=64)
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "support_ai_answer"
+
+
+class AIAnswerInput(models.Model):
+    answer = models.ForeignKey(AIAnswer, on_delete=models.PROTECT, related_name="inputs")
+    request = models.ForeignKey(AIRequest, on_delete=models.PROTECT)
+    request_version_snapshot = models.PositiveIntegerField()
+    query_snapshot = models.TextField()
+    sources_snapshot = models.JSONField()
+
+    class Meta:
+        db_table = "support_ai_answer_input"
+        constraints = [models.UniqueConstraint(fields=["answer", "request"], name="support_ai_answer_input_unique")]
+
+
+class AIAnswerInputMessage(models.Model):
+    input = models.ForeignKey(AIAnswerInput, on_delete=models.PROTECT)
+    message = models.ForeignKey(Message, on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "support_ai_answer_input_message"
+        constraints = [models.UniqueConstraint(fields=["input", "message"], name="support_ai_answer_msg_unique")]
+
+
+class AIAnswerPart(models.Model):
+    answer = models.ForeignKey(AIAnswer, on_delete=models.PROTECT, related_name="parts")
+    position = models.PositiveIntegerField()
+    text_snapshot = models.TextField()
+    message = models.OneToOneField(Message, null=True, on_delete=models.PROTECT, related_name="ai_answer_part")
+
+    class Meta:
+        db_table = "support_ai_answer_part"
+        constraints = [
+            models.UniqueConstraint(fields=["answer", "position"], name="support_ai_answer_part_unique"),
+            models.CheckConstraint(condition=Q(position__gte=1), name="support_ai_answer_part_position"),
+        ]
+
+
+class AIAnswerPartInput(models.Model):
+    part = models.ForeignKey(AIAnswerPart, on_delete=models.PROTECT)
+    input = models.ForeignKey(AIAnswerInput, on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "support_ai_answer_part_input"
+        constraints = [models.UniqueConstraint(fields=["part", "input"], name="support_ai_part_input_unique")]
+
+
+class AIPartDelivery(models.Model):
+    part = models.OneToOneField(AIAnswerPart, on_delete=models.PROTECT)
+    status = models.CharField(max_length=20, default="waiting")
+    vk_random_id = models.PositiveIntegerField(null=True, unique=True)
+    provider_message_id = models.PositiveBigIntegerField(null=True)
+    reason_code = models.CharField(max_length=48, blank=True)
+    created_at = models.DateTimeField()
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "support_ai_part_delivery"
+
+
+class AIPartAttempt(models.Model):
+    delivery = models.OneToOneField(AIPartDelivery, on_delete=models.PROTECT)
+    task = models.OneToOneField("jobs.BackgroundTask", on_delete=models.PROTECT)
+    operation_id = models.UUIDField(unique=True)
+    status = models.CharField(max_length=20, default="in_flight")
+    created_at = models.DateTimeField()
+    started_at = models.DateTimeField(null=True)
+    finished_at = models.DateTimeField(null=True)
+    reason_code = models.CharField(max_length=48, blank=True)
+    vk_error_code = models.PositiveIntegerField(null=True)
+
+    class Meta:
+        db_table = "support_ai_part_attempt"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(status__in=["in_flight", "unknown_outcome"], finished_at__isnull=True)
+                | Q(status__in=["succeeded", "failed"], finished_at__isnull=False),
+                name="support_ai_attempt_finished",
+            ),
+        ]
+
+
+class VKRandomReservation(models.Model):
+    random_id = models.PositiveIntegerField(primary_key=True)
+
+    class Meta:
+        db_table = "support_vk_random_reservation"

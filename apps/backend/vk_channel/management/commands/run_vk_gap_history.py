@@ -17,6 +17,8 @@ class Command(BaseCommand):
         parser.add_argument("--once", action="store_true")
 
     def handle(self, *args, **options):
+        if settings.VK_LONG_POLL_PILOT_PEER_ID:
+            raise CommandError("В пилотном режиме восполнение истории сообщества выключено.")
         value = settings.VK_GROUP_ID
         if not settings.VK_GAP_HISTORY_VERIFIED or not settings.VK_ACCESS_TOKEN:
             raise CommandError("Чтение истории разрыва выключено.")

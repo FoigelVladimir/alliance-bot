@@ -1,0 +1,260 @@
+from uuid import uuid4
+
+from django.db import connection, transaction
+
+from accounts.policies import quarantine_incident
+from jobs.models import BackgroundTask as Task
+from jobs.services import ClockTimestamp, LeaseLost, admit_external_call, claim, enqueue, finish
+from knowledge.search import SearchHit, sources_are_current
+from storage.services import database_time
+from vk_channel.client import DeliveryRejected, DeliveryUnknown
+from vk_channel.models import LongPollCursor
+
+from .models import AIAnswer, AIAnswerInput, AIPartAttempt, AIPartDelivery, Dialog, Message
+from .vk_keys import reserve_random_id
+
+TASK_TYPE = "send_vk_bot_part"
+
+
+def answer_hits(answer):
+    return [
+        SearchHit(item["fragment_id"], item["material_id"], item["publication_version"],
+                  item["prepared_snapshot_id"], "", "", 0)
+        for sources in answer.inputs.values_list("sources_snapshot", flat=True) for item in sources
+    ]
+
+
+def lock_chain(answer_id, *, verify_sources=False):
+    head = AIAnswer.objects.values("dialog_id", "dialog__cursor_id").get(pk=answer_id)
+    cursor = LongPollCursor.objects.select_for_update().get(pk=head["dialog__cursor_id"])
+    sources_ok = True
+    if verify_sources:
+        hits = answer_hits(AIAnswer.objects.get(pk=answer_id))
+        sources_ok = bool(hits) and sources_are_current(hits)
+    dialog = Dialog.objects.select_for_update().get(pk=head["dialog_id"])
+    answer = AIAnswer.objects.select_for_update().get(pk=answer_id)
+    deliveries = list(AIPartDelivery.objects.filter(part__answer=answer).select_related("part")
+                      .select_for_update(of=("self",)).order_by("pk"))
+    return cursor, dialog, answer, deliveries, sources_ok
+
+
+def block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id):
+    run = answer.aiprocessingrun
+    if quarantine_incident() or cursor.community_id != community_id or dialog.vk_peer_id != peer_id:
+        return "channel_unavailable"
+    if cursor.automation_paused or cursor.automation_epoch != run.automation_epoch:
+        return "channel_paused"
+    if dialog.mode != "ai_auto" or dialog.mode_version != answer.mode_version_snapshot:
+        return "dialog_changed"
+    if any(item.request.request_version != item.request_version_snapshot
+           for item in answer.inputs.select_related("request")):
+        return "question_changed"
+    if not sources_ok:
+        return "sources_changed"
+    return ""
+
+
+def cancel_waiting(answer, reason, now):
+    AIPartDelivery.objects.filter(part__answer=answer, status="waiting").update(
+        status="cancelled", reason_code=reason, updated_at=now,
+    )
+
+
+def reserved_elsewhere(answer):
+    for request_id, version in answer.inputs.values_list("request_id", "request_version_snapshot"):
+        if AIAnswerInput.objects.filter(
+            request_id=request_id, request_version_snapshot=version,
+            answer__parts__aipartdelivery__aipartattempt__isnull=False,
+        ).exclude(answer=answer).exists():
+            return True
+    return False
+
+
+@transaction.atomic
+def schedule_part(answer_id, community_id, peer_id):
+    cursor, dialog, answer, deliveries, sources_ok = lock_chain(answer_id, verify_sources=True)
+    next_part = next((item for item in sorted(deliveries, key=lambda item: item.part.position) if item.status != "sent"), None)
+    if next_part is None or next_part.status != "waiting":
+        return False
+    reason = block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id)
+    if not reason and reserved_elsewhere(answer):
+        reason = "request_version_already_reserved"
+    now = database_time()
+    if reason:
+        cancel_waiting(answer, reason, now)
+        return True
+    # Allocate the row ID before building the task that references it.
+    with connection.cursor() as db:
+        db.execute("SELECT nextval(pg_get_serial_sequence('support_ai_part_attempt', 'id'))")
+        attempt_id = db.fetchone()[0]
+    operation_id = uuid4()
+    next_part.vk_random_id = reserve_random_id()
+    next_part.status, next_part.updated_at = "pending", now
+    next_part.save(update_fields=["vk_random_id", "status", "updated_at"])
+    attempt = AIPartAttempt.objects.create(
+        pk=attempt_id, delivery=next_part, operation_id=operation_id, created_at=now,
+        task=enqueue(TASK_TYPE, operation_id, {"delivery_id": next_part.pk, "attempt_id": attempt_id}),
+    )
+    return bool(attempt.pk)
+
+
+def lock_attempt(task, *, verify_sources=False):
+    reference = AIPartAttempt.objects.filter(task_id=task.pk).values_list("delivery__part__answer_id", flat=True).first()
+    if reference is None:
+        raise LeaseLost(task.pk)
+    cursor, dialog, answer, deliveries, sources_ok = lock_chain(reference, verify_sources=verify_sources)
+    attempt = AIPartAttempt.objects.select_for_update().get(task_id=task.pk)
+    delivery = next(item for item in deliveries if item.pk == attempt.delivery_id)
+    if (task.payload != {"delivery_id": delivery.pk, "attempt_id": attempt.pk}
+            or task.idempotency_key != attempt.operation_id):
+        raise LeaseLost(task.pk)
+    return cursor, dialog, answer, delivery, attempt, sources_ok
+
+
+def set_outcome(answer, delivery, attempt, status, now, *, reason="", provider_id=None, error_code=None):
+    attempt.status = {"sent": "succeeded", "unknown_outcome": "unknown_outcome"}.get(status, "failed")
+    attempt.finished_at = None if status == "unknown_outcome" else now
+    attempt.reason_code, attempt.vk_error_code = reason, error_code
+    attempt.save(update_fields=["status", "finished_at", "reason_code", "vk_error_code"])
+    if status == "sent":
+        part = delivery.part
+        part.message = Message.objects.create(
+            dialog_id=answer.dialog_id, ticket_id=answer.aiprocessingrun.handoff_ticket_id,
+            direction="outbound_bot", text=part.text_snapshot, created_at=now,
+        )
+        part.save(update_fields=["message"])
+        delivery.provider_message_id = provider_id
+    else:
+        cancel_waiting(answer, "previous_part_unconfirmed", now)
+    delivery.status, delivery.reason_code, delivery.updated_at = status, reason, now
+    delivery.save(update_fields=["status", "reason_code", "updated_at", "provider_message_id"])
+
+
+@transaction.atomic
+def admit(task, community_id, peer_id):
+    cursor, dialog, answer, delivery, attempt, sources_ok = lock_attempt(task, verify_sources=True)
+    if delivery.status != "pending" or attempt.status != "in_flight" or attempt.started_at is not None:
+        raise LeaseLost(task.pk)
+    reason = block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id)
+    if reason:
+        finish(task, {"reason": reason}, status=Task.Status.FAILED)
+        set_outcome(answer, delivery, attempt, "cancelled", database_time(), reason=reason)
+        return None
+    admit_external_call(task)
+    attempt.started_at = database_time()
+    attempt.save(update_fields=["started_at"])
+    return dialog.vk_peer_id, delivery.vk_random_id, delivery.part.text_snapshot
+
+
+@transaction.atomic
+def complete(task, status, **outcome):
+    _, _, answer, delivery, attempt, _ = lock_attempt(task)
+    if delivery.status != "pending" or attempt.status != "in_flight" or attempt.started_at is None:
+        raise LeaseLost(task.pk)
+    task_status = {"sent": Task.Status.DONE, "unknown_outcome": Task.Status.UNKNOWN}.get(status, Task.Status.FAILED)
+    finish(task, {"attempt_id": str(attempt.operation_id)}, status=task_status)
+    set_outcome(answer, delivery, attempt, status, database_time(), **outcome)
+
+
+@transaction.atomic
+def recover_expired():
+    candidate = Task.objects.filter(task_type=TASK_TYPE, status=Task.Status.PROCESSING,
+                                    locked_until__lte=ClockTimestamp()).order_by("locked_until", "pk").first()
+    if candidate is None:
+        return False
+    _, _, answer, delivery, attempt, _ = lock_attempt(candidate)
+    task = Task.objects.select_for_update().get(pk=candidate.pk)
+    now = database_time()
+    if task.status != Task.Status.PROCESSING or task.locked_until > now:
+        return False
+    if attempt.started_at is not None or task.admitted_at is not None:
+        reason = "worker_lease_expired"
+        set_outcome(answer, delivery, attempt, "unknown_outcome", now, reason=reason)
+        status = Task.Status.UNKNOWN
+    elif task.attempt_count >= task.max_attempts:
+        reason = "queue_exhausted_before_dispatch"
+        set_outcome(answer, delivery, attempt, "failed", now, reason=reason)
+        status = Task.Status.DEAD
+    else:
+        reason, status = "", Task.Status.RETRY
+    Task.objects.filter(pk=task.pk).update(
+        status=status, result={"reason": reason} if reason else None, scheduled_at=now,
+        lease_token=None, locked_until=None, updated_at=now,
+    )
+    return True
+
+
+def run_bot_sender_once(community_id, peer_id, send):
+    while recover_expired():
+        pass
+    candidate = AIPartDelivery.objects.filter(
+        status="waiting", part__answer__dialog__cursor__community_id=community_id,
+        part__answer__dialog__vk_peer_id=peer_id,
+    ).exclude(part__answer__parts__aipartdelivery__status="pending").order_by("pk").first()
+    scheduled = candidate is not None and schedule_part(candidate.part.answer_id, community_id, peer_id)
+    task = claim([TASK_TYPE])
+    if task is None:
+        return scheduled
+    try:
+        parameters = admit(task, community_id, peer_id)
+        if parameters is None:
+            return True
+        try:
+            provider_id = send(*parameters)
+        except DeliveryRejected as exc:
+            complete(task, "failed", reason="vk_rejected", error_code=exc.code)
+        except (DeliveryUnknown, OSError):
+            complete(task, "unknown_outcome", reason="vk_confirmation_lost")
+        else:
+            complete(task, "sent", provider_id=provider_id)
+    except LeaseLost:
+        pass
+    return True
+
+
+def cancel_for_handoff(answer_id, now):
+    """The caller holds the dialog lock and has already linked the handoff card."""
+    answer = AIAnswer.objects.select_for_update().get(pk=answer_id)
+    deliveries = AIPartDelivery.objects.filter(part__answer=answer, status="pending").select_for_update().order_by("pk")
+    cancel_waiting(answer, "dialog_changed", now)
+    for delivery in deliveries:
+        attempt = AIPartAttempt.objects.select_for_update().get(delivery=delivery)
+        if attempt.started_at is None and attempt.status == "in_flight":
+            Task.objects.filter(pk=attempt.task_id, admitted_at__isnull=True).update(
+                status=Task.Status.FAILED, result={"reason": "dialog_changed"},
+                lease_token=None, locked_until=None, updated_at=now,
+            )
+            set_outcome(answer, delivery, attempt, "cancelled", now, reason="dialog_changed")
+
+
+@transaction.atomic
+def isolate_restored_bot_deliveries():
+    if not quarantine_incident():
+        raise ValueError("Запустите команду в карантине восстановления.")
+    answer_ids = list(AIPartDelivery.objects.filter(
+        status__in=("waiting", "pending", "unknown_outcome"),
+    ).order_by("part__answer_id").values_list("part__answer_id", flat=True).distinct())
+    for answer_id in answer_ids:
+        _, _, _, deliveries, _ = lock_chain(answer_id)
+        now = database_time()
+        for delivery in deliveries:
+            if delivery.status not in {"waiting", "pending", "unknown_outcome"}:
+                continue
+            attempt = AIPartAttempt.objects.select_for_update().filter(delivery=delivery).first()
+            if attempt is None:
+                if delivery.status == "pending" or delivery.vk_random_id is not None:
+                    raise ValueError("Нарушена связь восстановленной части и попытки.")
+            else:
+                task = Task.objects.select_for_update().get(pk=attempt.task_id)
+                if (delivery.status == "waiting" or delivery.vk_random_id is None or task.task_type != TASK_TYPE
+                        or task.idempotency_key != attempt.operation_id
+                        or task.payload != {"delivery_id": delivery.pk, "attempt_id": attempt.pk}):
+                    raise ValueError("Нарушена связь восстановленной попытки и задания.")
+                attempt.status, attempt.reason_code, attempt.finished_at = "unknown_outcome", "recovered_from_backup", None
+                attempt.save(update_fields=["status", "reason_code", "finished_at"])
+                Task.objects.filter(pk=task.pk).update(
+                    status=Task.Status.UNKNOWN, result={"reason": "recovered_from_backup"},
+                    lease_token=None, locked_until=None, updated_at=now,
+                )
+            delivery.status, delivery.reason_code, delivery.updated_at = "unknown_outcome", "recovered_from_backup", now
+            delivery.save(update_fields=["status", "reason_code", "updated_at"])

@@ -79,6 +79,7 @@ if any(CAS_ROOT.is_relative_to(path.resolve()) or path.resolve().is_relative_to(
        for path in [STATIC_ROOT, *STATICFILES_DIRS]):
     raise ImproperlyConfigured("CAS_ROOT must be separate from public static files.")
 BACKGROUND_TASK_HANDLERS = {
+    "knowledge.prepare_text": "knowledge.preparation.prepare_text_task",
     "support.route_inbound": "vk_channel.services.route_inbound_task",
     "vk.handle_student_click": "vk_channel.student_actions.handle_click_task",
 }
@@ -120,6 +121,7 @@ VK_GROUP_ID = os.environ.get("VK_GROUP_ID", "")
 VK_ACCESS_TOKEN = os.environ.get("VK_ACCESS_TOKEN", "")
 VK_SEND_ENABLED = os.environ.get("VK_SEND_ENABLED") == "1"
 VK_HISTORY_CORRELATION_VERIFIED = os.environ.get("VK_HISTORY_CORRELATION_VERIFIED") == "1"
+VK_LONG_POLL_PILOT_PEER_ID = os.environ.get("VK_LONG_POLL_PILOT_PEER_ID", "")
 VK_LONG_POLL_ENABLED = os.environ.get("VK_LONG_POLL_ENABLED") == "1"
 
 VK_ATTACHMENT_FETCH_ENABLED = os.environ.get("VK_ATTACHMENT_FETCH_ENABLED") == "1"
@@ -129,3 +131,13 @@ VK_ATTACHMENT_HOSTS = frozenset(
 
 VK_GAP_HISTORY_VERIFIED = os.environ.get("VK_GAP_HISTORY_VERIFIED") == "1"
 VK_CLICK_ANSWERS_VERIFIED = os.environ.get("VK_CLICK_ANSWERS_VERIFIED") == "1"
+
+KNOWLEDGE_E5_ROOT = os.environ.get("KNOWLEDGE_E5_ROOT", "")
+
+SUPPORT_AI_LOOKUP_ENABLED = os.environ.get("SUPPORT_AI_LOOKUP_ENABLED") == "1"
+
+SUPPORT_AI_GENERATION_ENABLED = os.environ.get("SUPPORT_AI_GENERATION_ENABLED") == "1"
+MODEL_BASE_URL = os.environ.get("MODEL_BASE_URL", "")
+MODEL_NAME = os.environ.get("MODEL_NAME", "")
+MODEL_SHA256 = os.environ.get("MODEL_SHA256", "")
+VK_BOT_SEND_ENABLED = os.environ.get("VK_BOT_SEND_ENABLED") == "1"

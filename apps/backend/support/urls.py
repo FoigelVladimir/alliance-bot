@@ -1,8 +1,12 @@
 from django.urls import path
 
-from . import views
+from . import ai_journal, views
 
 urlpatterns = [
+    path("ai-journal/", ai_journal.journal, name="support-ai-journal"),
+    path("fragments/ai-journal/", ai_journal.journal, {"fragment": True}, name="support-ai-journal-fragment"),
+    path("ai-answers/<int:answer_id>/", ai_journal.answer_detail, name="support-ai-answer"),
+    path("ai-processing-runs/<int:run_id>/", ai_journal.processing_run, name="support-ai-processing-run"),
     path("attachments/<int:attachment_id>/prepare/", views.prepare_attachment, name="support-attachment-prepare"),
     path("attachments/<int:attachment_id>/state/", views.attachment_state, name="support-attachment-state"),
     path("attachments/<int:attachment_id>/content/", views.attachment_content, name="support-attachment-content"),
@@ -14,6 +18,7 @@ urlpatterns = [
     path("review/<int:route_id>/route/", views.resolve_review, {"action": "route_to_support"}, name="support-route"),
     path("review/<int:route_id>/dismiss/", views.resolve_review, {"action": "dismiss_review"}, name="support-dismiss"),
     path("tickets/<int:ticket_id>/", views.ticket_detail, name="support-ticket"),
+    path("tickets/<int:ticket_id>/knowledge-search/", views.knowledge_search, name="support-knowledge-search"),
     path("tickets/<int:ticket_id>/state/", views.ticket_state, name="support-ticket-state"),
     path("tickets/<int:ticket_id>/fragments/header/", views.header_fragment, name="support-header-fragment"),
     path("tickets/<int:ticket_id>/fragments/history/", views.history_fragment, name="support-history-fragment"),

@@ -1,0 +1,26 @@
+{% load l10n %}
+<section class="mt-6" aria-label="Результаты" data-ai-journal-list>
+  {% if date_error %}<p class="mb-4" role="status">Период сброшен. Укажите корректные даты.</p>{% endif %}
+  <ul class="space-y-4">
+    {% for run, reason in entries %}
+      <li class="border border-neutral-300 p-4">
+        <p class="text-sm text-neutral-700">{{ run.finished_at|date:"d.m.Y, H:i" }} · {{ reason }}</p>
+        {% for input in run.inputs.all %}
+          <p class="mt-2 break-words">{{ input.question_text|truncatechars:180 }}</p>
+        {% endfor %}
+        {% if run.answer_id %}
+          <a class="mt-2 inline-flex min-h-12 items-center underline" href="{% url 'support-ai-answer' run.answer_id %}">Открыть ответ №{{ run.answer_id }}</a>
+        {% else %}
+          <a class="mt-2 inline-flex min-h-12 items-center underline" href="{% url 'support-ai-processing-run' run.pk %}">Открыть попытку №{{ run.pk }}</a>
+        {% endif %}
+      </li>
+    {% empty %}<li>Завершённых попыток по этим фильтрам пока нет.</li>{% endfor %}
+  </ul>
+  {% if page.has_other_pages %}
+    <nav class="mt-4 flex gap-4" aria-label="Страницы журнала">
+      {% if page.has_previous %}<a class="underline" href="{% url 'support-ai-journal' %}{% querystring pagination page=page.previous_page_number %}">Назад</a>{% endif %}
+      <span>{{ page.number }} из {{ page.paginator.num_pages }}</span>
+      {% if page.has_next %}<a class="underline" href="{% url 'support-ai-journal' %}{% querystring pagination page=page.next_page_number %}">Далее</a>{% endif %}
+    </nav>
+  {% endif %}
+</section>

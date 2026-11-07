@@ -6,9 +6,13 @@
   <a class="inline-flex min-h-12 items-center underline" href="{% url 'knowledge-materials' %}">Все материалы</a>
   <h1 class="mt-3 text-3xl font-semibold">{% if new_draft %}Новый черновик{% else %}{{ version.title }}{% endif %}</h1>
   <p class="mt-3 text-neutral-700">Материал №{{ material.pk }}{% if version %} · черновик №{{ version.pk }} · правка {{ version.draft_revision }}{% endif %}</p>
-  <p class="mt-2 text-sm text-neutral-600">Не подготовлен. Текст не доступен боту, сохранение не публикует материал.</p>
+
+  {% if origin_ticket_id %}
+    <p class="mt-3"><a class="underline" href="{% url 'support-ticket' origin_ticket_id %}">Исходное обращение №{{ origin_ticket_id }}</a></p>
+    {% if not version.sealed_at %}<p class="mt-3">Уберите личные сведения и проверьте факты перед публикацией.</p>{% endif %}
+  {% endif %}
   {% if version %}<p class="mt-2 text-sm text-neutral-600">Создал: {{ version.created_by.display_name|default:"Сотрудник" }}. Последняя правка: {{ version.updated_by.display_name|default:"Сотрудник" }}, {{ version.updated_at|date:"j E, H:i" }}.</p>{% endif %}
-  {% if version and version.base_publication_revision != material.publication_revision %}<p class="mt-4">Публикация изменилась после создания этого черновика. Перед будущей публикацией потребуется сверка.</p>{% endif %}
+
   {% if error_message %}<p class="mt-5 rounded-lg border border-red-800 p-4 text-red-800" role="alert">{{ error_message }}</p>{% endif %}
   {% if show_comparison %}
     <section class="mt-5 rounded-xl border border-neutral-300 bg-white p-5" aria-labelledby="saved-text-title">
@@ -26,6 +30,84 @@
       <button class="mt-5 min-h-12 rounded-lg bg-neutral-950 px-4 py-3 font-semibold text-white" type="submit">{% if new_draft %}Создать отдельный черновик{% else %}Сохранить черновик{% endif %}</button>
     </form>
   {% else %}<p class="mt-6">Этот снимок больше нельзя редактировать.</p><p class="mt-4 whitespace-pre-wrap break-words">{{ version.source_text }}</p>{% endif %}
+  {% if version and not version.sealed_at %}
+    <section class="mt-6 rounded-xl border border-neutral-300 bg-white p-6" aria-labelledby="prepare-title">
+      <h2 class="text-xl font-semibold" id="prepare-title">Подготовка источника</h2>
+      <p class="mt-3 text-sm text-neutral-700" role="status">
+        {% if preparation.status == "preparing" %}Текст готовится. Обновите страницу, чтобы проверить результат.
+        {% elif preparation.index_status == "indexing" %}Текст подготовлен. Поисковый индекс в очереди или строится.
+        {% elif preparation.index_status == "ready" %}Поисковый индекс готов. Снимок доступен для проверки.
+        {% elif preparation.index_status == "failed" %}Не удалось построить индекс. Повторите подготовку.
+        {% elif preparation.status == "source_prepared" %}Текст подготовлен. Запустите подготовку заново, чтобы построить индекс.
+        {% elif preparation.reason == "empty_source" %}Источник пуст. Добавьте текст и сохраните черновик перед подготовкой.
+        {% elif preparation.status == "failed" %}Не удалось подготовить текст. Повторите подготовку.
+        {% else %}Сохраните правки перед подготовкой. В снимок войдёт сохранённый текст.{% endif %}
+      </p>
+      {% if snapshot %}
+        <details class="mt-4"{% if preparation.index_status == "ready" %} open{% endif %}>
+          <summary class="cursor-pointer font-semibold underline">Посмотреть подготовленный текст</summary>
+          <p class="mt-3 whitespace-pre-wrap break-words">{{ snapshot.prepared_text }}</p>
+        </details>
+      {% endif %}
+      {% if preparation.status == "preparing" or preparation.index_status == "indexing" %}
+        <a class="mt-4 inline-flex min-h-12 items-center underline" href="{% url 'knowledge-draft' material.pk version.pk %}">Проверить готовность</a>
+      {% endif %}
+      {% if preparation.status != "preparing" and preparation.index_status != "indexing" and preparation.index_status != "ready" and not show_comparison %}
+        <form class="mt-4" method="post" action="{% url 'knowledge-prepare' material.pk version.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="client_operation_id" value="{{ prepare_operation_id }}">
+          <input type="hidden" name="expected_draft_revision" value="{{ version.draft_revision|unlocalize }}">
+          <button class="min-h-12 rounded-lg border border-neutral-700 px-3 py-2 font-semibold hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 active:translate-y-px" type="submit">Подготовить сохранённый текст</button>
+        </form>
+      {% endif %}
+    </section>
+  {% endif %}
+  {% if version %}
+    {% if not version.sealed_at and version.base_publication_revision != material.publication_revision %}
+      <section class="mt-6 rounded-xl border border-neutral-300 bg-white p-6" aria-labelledby="rebase-title">
+        <h2 id="rebase-title" class="text-xl font-semibold">Сверка с публикацией</h2>
+        <p class="mt-3 text-neutral-700">Публикация изменилась. Сравните её с сохранённым черновиком. После сверки подготовьте снимок заново.</p>
+        {% if current_publication %}
+          <details class="mt-4" open>
+            <summary class="cursor-pointer font-semibold underline">{{ current_publication.title }}</summary>
+            <p class="mt-3 whitespace-pre-wrap break-words">{{ current_publication.published_prepared_snapshot.prepared_text }}</p>
+          </details>
+        {% else %}<p class="mt-3">Сейчас действующей публикации нет.</p>{% endif %}
+        <form class="mt-4" method="post" action="{% url 'knowledge-rebase' material.pk version.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="client_operation_id" value="{{ rebase_operation_id }}">
+          <input type="hidden" name="expected_draft_revision" value="{{ version.draft_revision|unlocalize }}">
+          <input type="hidden" name="expected_publication_revision" value="{{ material.publication_revision|unlocalize }}">
+          <button class="min-h-12 rounded-lg border border-neutral-700 px-3 py-2 font-semibold hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 active:translate-y-px" type="submit">Подтвердить сверку</button>
+        </form>
+      </section>
+    {% elif not version.sealed_at and preparation.index_status == "ready" and not show_comparison %}
+      <section class="mt-6 rounded-xl border border-neutral-300 bg-white p-6" aria-labelledby="publish-title">
+        <h2 id="publish-title" class="text-xl font-semibold">Публикация</h2>
+        <p class="mt-3 text-neutral-700">После публикации бот сможет использовать подготовленный текст в ответах студентам.</p>
+        <form class="mt-4" method="post" action="{% url 'knowledge-publish' material.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="client_operation_id" value="{{ publication_operation_id }}">
+          <input type="hidden" name="version_id" value="{{ version.pk|unlocalize }}">
+          <input type="hidden" name="prepared_snapshot_id" value="{{ preparation.snapshot_id }}">
+          <input type="hidden" name="expected_publication_revision" value="{{ material.publication_revision|unlocalize }}">
+          <button class="min-h-12 rounded-lg bg-neutral-950 px-3 py-2 font-semibold text-white hover:bg-neutral-800 focus-visible:outline-2 focus-visible:outline-offset-2 active:translate-y-px" type="submit">Опубликовать просмотренный снимок</button>
+        </form>
+      </section>
+    {% elif version.is_published %}
+      <section class="mt-6 rounded-xl border border-neutral-300 bg-white p-6" aria-labelledby="publication-title">
+        <h2 id="publication-title" class="text-xl font-semibold">Действующая публикация</h2>
+        {% if version.publication_verification_required %}<p class="mt-3">После восстановления этот материал ждёт проверки и исключён из поиска.</p>{% endif %}
+        <form class="mt-4" method="post" action="{% url 'knowledge-unpublish' material.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="client_operation_id" value="{{ publication_operation_id }}">
+          <input type="hidden" name="version_id" value="{{ version.pk|unlocalize }}">
+          <input type="hidden" name="expected_publication_revision" value="{{ material.publication_revision|unlocalize }}">
+          <button class="min-h-12 rounded-lg border border-neutral-700 px-3 py-2 font-semibold hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2 active:translate-y-px" type="submit">Снять с публикации</button>
+        </form>
+      </section>
+    {% endif %}
+  {% endif %}
   {% if version %}<a class="mt-4 inline-flex min-h-12 items-center underline" href="{% url 'knowledge-new-draft' material.pk %}">Добавить отдельный черновик</a>{% endif %}
 </main>
 {% endblock %}

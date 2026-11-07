@@ -8,6 +8,9 @@
       · Открыто {{ ticket.created_at|date:"j E, H:i" }} · Диалог {{ ticket.dialog.vk_peer_id }}
       {% if ticket.closed_at %} · Закрыто {{ ticket.closed_at|date:"j E, H:i" }}{% endif %}
     </p>
+    {% if ticket.handoff_reason == "student_requested_manager" %}
+      <p class="mt-2 text-sm text-neutral-700">Студент попросил позвать менеджера.</p>
+    {% endif %}
     {% if can_take %}
       <form class="mt-4" action="{% url 'support-take' ticket.pk %}" method="post" data-support-command>
         {% csrf_token %}

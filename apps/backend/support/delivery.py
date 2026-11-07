@@ -1,5 +1,4 @@
 from datetime import timedelta
-from secrets import randbelow
 
 from django.conf import settings
 from django.db import transaction
@@ -13,6 +12,7 @@ from vk_channel.client import DeliveryRejected, DeliveryUnknown
 from vk_channel.services import database_now
 from vk_channel.student_actions import issue_ticket_action
 
+from .vk_keys import reserve_random_id
 from .models import Dialog, Draft, Message, OutgoingAttempt as Attempt, OutgoingResponse as Response, Ticket
 from .queries import allowed_communities, ticket_data
 from .services import reserve_command, support_actor, visible_dialog
@@ -52,14 +52,11 @@ def send_response(session, ticket_id, operation_id, version, text, source_draft)
         draft = Draft.objects.select_for_update().filter(pk=draft_id, ticket=ticket, author=actor).first()
         if draft is None or draft.revision != revision or draft.text != text:
             raise AccessError("draft_revision_conflict", 409)
-    for _ in range(8):
-        response, inserted = Response.objects.get_or_create(vk_random_id=randbelow(2**31 - 1) + 1, defaults={
-            "ticket": ticket, "command": command, "assignment_version": version, "text": text,
-            "source_draft_id_snapshot": draft_id, "source_draft_revision": revision,
-        })
-        if inserted:
-            return create_attempt(response, command, "initial"), False
-    raise AccessError("send_unavailable", 503)
+    response = Response.objects.create(
+        vk_random_id=reserve_random_id(), ticket=ticket, command=command, assignment_version=version, text=text,
+        source_draft_id_snapshot=draft_id, source_draft_revision=revision,
+    )
+    return create_attempt(response, command, "initial"), False
 
 
 @transaction.atomic

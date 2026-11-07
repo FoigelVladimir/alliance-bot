@@ -6,8 +6,11 @@ from uuid import NAMESPACE_OID, UUID, uuid4, uuid5
 from django.conf import settings
 from django.db import connection, transaction
 
+from accounts.policies import quarantine_incident
 from jobs.services import enqueue
+from support.ai_processing import begin_lookup
 from support.attachment_source import source_url
+from support.handoff import route_live_message
 from support.models import Attachment, Dialog, InboundRoute, Message, Ticket
 
 from .models import InboundEvent, LongPollCursor, LongPollGap
@@ -180,8 +183,11 @@ def save_event(cursor, update, gap=None):
         sender_vk_id=sender_id, text=text,
     )
     Attachment.objects.bulk_create(attachment_metadata(message, attachments))
+    reply = data.get("reply_message")
+    reply_to_cmid = reply.get("conversation_message_id") if isinstance(reply, dict) else None
     route = InboundRoute.objects.create(
         message=message, dialog=dialog, sequence=dialog.last_inbound_sequence, mode_version=dialog.mode_version,
+        reply_to_cmid=reply_to_cmid if valid_id(reply_to_cmid) else None,
         automation_epoch=cursor.automation_epoch, historical=gap is not None, automation_paused=cursor.automation_paused,
     )
     enqueue(TASK_TYPE, uuid5(NAMESPACE_OID, f"{TASK_TYPE}:{route.pk}"), {"route_id": route.pk})
@@ -196,9 +202,28 @@ def validate_updates(updates):
         raise InvalidBatch("Unrecognizable event batch")
 
 
+def pilot_updates(updates, community_id, peer_id):
+    if not isinstance(updates, list) or not valid_id(peer_id):
+        raise InvalidBatch("Invalid pilot batch or dialog")
+    scoped = []
+    for update in updates:
+        if not isinstance(update, dict) or not valid_id(update.get("group_id")) or update["group_id"] != community_id:
+            continue
+        item = update.get("object")
+        kind = update.get("type")
+        if not isinstance(item, dict) or kind not in ("message_new", "message_event"):
+            continue
+        data = item.get("message") if kind == "message_new" else item
+        if isinstance(data, dict) and valid_id(data.get("peer_id")) and data["peer_id"] == peer_id:
+            scoped.append(update)
+    return scoped
+
+
 @transaction.atomic
-def commit_batch(reader, next_position, updates):
+def commit_batch(reader, next_position, updates, *, pilot_peer_id=None):
     next_position = position_value(next_position)
+    if pilot_peer_id is not None:
+        updates = pilot_updates(updates, reader.community_id, pilot_peer_id)
     validate_updates(updates)
     cursor = locked_cursor(reader)
     for update in updates:
@@ -214,19 +239,21 @@ def commit_batch(reader, next_position, updates):
 
 
 @transaction.atomic
-def record_gap(reader, next_position, reason):
+def record_gap(reader, next_position, reason, *, allow_history=True):
     next_position = position_value(next_position)
     if reason not in {"position_lost", "key_recovery_failed", "database_restore"}:
         raise InvalidBatch("Invalid gap reason")
-    return open_gap(locked_cursor(reader), next_position, reason)
+    return open_gap(locked_cursor(reader), next_position, reason, allow_history=allow_history)
 
 
-def open_gap(cursor, next_position, reason, *, incident=""):
+def open_gap(cursor, next_position, reason, *, incident="", allow_history=True):
+    scoped = not allow_history or bool(settings.VK_LONG_POLL_PILOT_PEER_ID)
+    history_enabled = settings.VK_GAP_HISTORY_VERIFIED and not scoped
     gap = LongPollGap.objects.create(
         cursor=cursor, period=cursor.period, previous_position=cursor.position, next_position=next_position,
         previous_batch_at=cursor.last_batch_at, reason=reason, restore_incident=incident,
-        status="queued" if settings.VK_GAP_HISTORY_VERIFIED else "needs_review",
-        coverage={} if settings.VK_GAP_HISTORY_VERIFIED else {"reasons": ["history_unverified"]},
+        status="queued" if history_enabled else "needs_review",
+        coverage={} if history_enabled else {"reasons": ["pilot_dialog_scope" if scoped else "history_unverified"]},
     )
     cursor.position = next_position
     cursor.period += 1
@@ -237,7 +264,7 @@ def open_gap(cursor, next_position, reason, *, incident=""):
     cursor.save(update_fields=[
         "position", "period", "automation_epoch", "automation_paused", "lease_token", "leased_until",
     ])
-    if settings.VK_GAP_HISTORY_VERIFIED:
+    if history_enabled:
         enqueue(GAP_TASK, uuid5(NAMESPACE_OID, f"{GAP_TASK}:{gap.pk}"), {"gap_id": gap.pk})
     return gap
 
@@ -254,22 +281,30 @@ def save_historical_batch(gap_id, updates):
 
 def route_inbound_task(task):
     def save_result():
+        dialog_id, cursor_id = InboundRoute.objects.values_list("dialog_id", "dialog__cursor_id").get(
+            pk=task.payload["route_id"],
+        )
+        cursor = LongPollCursor.objects.select_for_update().get(pk=cursor_id)
+        dialog = Dialog.objects.select_for_update().get(pk=dialog_id)
         route = InboundRoute.objects.select_for_update().get(pk=task.payload["route_id"])
         if route.status == "pending":
-            if route.message.ticket_id:
+            message = Message.objects.select_for_update().get(pk=route.message_id)
+            if message.ticket_id:
                 route.status = "attached"
-            else:
-                route.status = "needs_review"
-                route.reason = (
-                    "historical" if route.historical else "channel_paused" if route.automation_paused else "manual_support"
-                )
+            elif route.historical:
+                route.status, route.reason = "needs_review", "historical"
+            elif route.automation_paused or cursor.automation_paused or quarantine_incident():
+                route.status, route.reason = "needs_review", "channel_paused"
+            elif not route_live_message(cursor, dialog, route, message):
+                if not begin_lookup(cursor, dialog, route, message):
+                    route.status, route.reason = "needs_review", "manual_support"
             route.save(update_fields=["status", "reason"])
         return {"route_id": route.pk, "status": route.status}
     return save_result
 
 
 
-def poll_once(reader, server, read, discover):
+def poll_once(reader, server, read, discover, *, pilot_peer_id=None):
     """Read outside transactions and return the new reader and current server parameters."""
     renew_reader(reader)
     result = read(server, reader.position)
@@ -279,8 +314,9 @@ def poll_once(reader, server, read, discover):
         renew_reader(reader)
         result = read(server, reader.position)
     if "failed" not in result:
-        return commit_batch(reader, result.get("ts"), result.get("updates")), server
+        return commit_batch(reader, result.get("ts"), result.get("updates"), pilot_peer_id=pilot_peer_id), server
     if type(result["failed"]) is int and result["failed"] == 1 and "updates" not in result:
-        record_gap(reader, result.get("ts"), "key_recovery_failed" if refreshed else "position_lost")
+        record_gap(reader, result.get("ts"), "key_recovery_failed" if refreshed else "position_lost",
+                   allow_history=pilot_peer_id is None)
         return None, server
     raise InvalidBatch("Unexpected Long Poll failure")

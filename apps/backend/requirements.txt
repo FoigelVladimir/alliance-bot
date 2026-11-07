@@ -4,3 +4,6 @@ psycopg[binary]==3.3.8
 
 # Bounded decoding of support image attachments (stage 1В).
 Pillow==13.0.0
+
+# PostgreSQL vector field for stage 1Г.
+pgvector==0.5.1

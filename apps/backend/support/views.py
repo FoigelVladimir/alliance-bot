@@ -5,12 +5,14 @@ from django.core.paginator import Paginator
 from django.db.models import Prefetch
 from django.http import JsonResponse
 from django.shortcuts import render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.csrf import csrf_failure as default_csrf_failure
 from django.views.decorators.http import require_http_methods, require_POST, require_safe
 
 from accounts.services import AccessError
 from accounts.views import json_object, private, text_value
+from knowledge.search import hybrid_search
 
 from . import attachments
 from .closing import close_ticket
@@ -522,3 +524,23 @@ def attachment_content(request, attachment_id, download=False):
     )
     response["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+@private
+@require_safe
+def knowledge_search(request, ticket_id):
+    actor = support_actor(request.session)
+    check_path_id(ticket_id)
+    read_ticket(actor, ticket_id)
+    question = request.GET.get("q", "").strip()
+    if len(question) > 500 or "\0" in question:
+        raise AccessError("invalid_request", 400)
+    try:
+        hits = hybrid_search(question)
+    except (ImportError, OSError, ValueError):
+        raise AccessError("knowledge_search_unavailable", 503) from None
+    return JsonResponse({"results": [
+        {"title": hit.heading, "content": hit.content,
+         "source_url": reverse("knowledge-draft", args=[hit.material_id, hit.version_id])}
+        for hit in hits
+    ]})

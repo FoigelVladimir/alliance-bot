@@ -12,6 +12,7 @@
     <a class="underline" href="?view=open&amp;q={{ query|urlencode }}" {% if view == "open" %}aria-current="page"{% endif %}>Все открытые</a>
     <a class="underline" href="?view=closed&amp;q={{ query|urlencode }}" {% if view == "closed" %}aria-current="page"{% endif %}>Закрытые</a>
     <a class="underline" href="#review">Требует разбора</a>
+    <a class="underline" href="{% url 'support-ai-journal' %}">Журнал автоматической помощи</a>
   </nav>
   <form class="mt-6" action="{% url 'support-queue' %}" method="get">
     <input type="hidden" name="view" value="{{ view }}">

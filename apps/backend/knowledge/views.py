@@ -9,13 +9,21 @@ from django.views.decorators.http import require_http_methods
 
 from accounts.services import AccessError
 from accounts.views import json_object, private
+from support.queries import allowed_communities
 from support.services import support_actor
 
-from . import queries, services
-from .models import Material
+from . import preparation, publication, queries, services
+from .models import Material, MaterialVersion
 
 ERROR_MESSAGES = {
     "draft_revision_conflict": "Черновик изменил другой сотрудник. Сравните сохранённый текст с вашим вводом перед повторным сохранением.",
+    "material_not_ready": "Дождитесь готовности индекса и снова откройте снимок.",
+    "draft_base_changed": "Публикация изменилась. Сверьте черновик с текущей версией.",
+    "publication_revision_conflict": "Публикация изменилась. Проверьте текущую версию.",
+    "prepared_snapshot_changed": "Подготовленный снимок изменился. Проверьте новый текст.",
+    "published_version_changed": "Действующая версия изменилась. Проверьте текущую публикацию.",
+    "support_message_not_found": "Выберите вопрос и подтверждённый ответ из этого обращения.",
+    "preparation_in_progress": "Эта правка уже готовится. Обновите страницу, чтобы проверить результат.",
     "draft_sealed": "Этот снимок больше нельзя редактировать. Создайте отдельный черновик.",
     "operation_mismatch": "Этот идентификатор команды уже использован для другого действия. Проверьте данные и отправьте форму заново.",
     "invalid_content": "Укажите название до 200 символов и описание до 2000 символов.",
@@ -51,14 +59,18 @@ def content_command(request, *, saving=False):
     if request.content_type == "application/x-www-form-urlencoded":
         tags = [tag.strip() for tag in tags.split(",") if tag.strip()] if isinstance(tags, str) else tags
         if saving:
-            value = data["expected_draft_revision"]
-            if not value.isascii() or not value.isdecimal() or len(value) > 19:
-                raise AccessError("invalid_request", 400)
-            data["expected_draft_revision"] = int(value)
+            data["expected_draft_revision"] = expected_revision(data)
     return data, {
         "title": data["title"], "description": data.get("description", ""), "tags": tags,
         "source_type": data.get("source_type", "text"), "source_text": data.get("source_text", ""),
     }
+
+
+def expected_revision(data):
+    value = data["expected_draft_revision"]
+    if isinstance(value, str) and value.isascii() and value.isdecimal() and len(value) <= 19:
+        return int(value)
+    raise AccessError("invalid_request", 400)
 
 
 def form_values(version=None, request=None):
@@ -77,12 +89,17 @@ def render_page(request, template, context, *, status=200):
 
 
 def catalog_page(request, *, error=None):
-    page = Paginator(queries.materials(), 20).get_page(request.GET.get("page", "1"))
+    page = Paginator(queries.materials(support_actor(request.session)), 20).get_page(request.GET.get("page", "1"))
+    for material in page:
+        for version in material.versions.all():
+            version.preparation_state = preparation.preparation_data(version.current_preparation)
     if as_json(request) and error is None:
         return JsonResponse({"materials": [
             {**queries.material_data(material), "drafts": [
                 {"id": str(version.pk), "title": version.title, "draft_revision": version.draft_revision,
-                 "updated_at": version.updated_at, "editable": version.sealed_at is None}
+                 "updated_at": version.updated_at, "editable": version.sealed_at is None,
+                 "preparation_status": version.preparation_state["status"],
+                 "index_status": version.preparation_state.get("index_status", "not_indexed")}
                 for version in material.versions.all()
             ]} for material in page
         ], "page": page.number, "total_count": page.paginator.count})
@@ -93,7 +110,7 @@ def catalog_page(request, *, error=None):
 
 
 def command_response(request, command, replayed, *, created=False):
-    version = queries.read_draft(command.material_id, command.version_id)
+    version = queries.read_draft(support_actor(request.session), command.material_id, command.version_id)
     if as_json(request):
         return JsonResponse({
             "operation": {"client_operation_id": str(command.client_operation_id), "action": command.action,
@@ -126,7 +143,7 @@ def materials(request):
 def new_draft(request, material_id):
     support_actor(request.session)
     check_ids(material_id)
-    material = Material.objects.filter(pk=material_id).first()
+    material = services.visible_materials(support_actor(request.session)).filter(pk=material_id).first()
     if material is None:
         raise AccessError("material_not_found", 404)
     error = None
@@ -164,12 +181,142 @@ def draft(request, material_id, version_id):
             error = caught
         else:
             return command_response(request, command, replayed)
-    version = queries.read_draft(material_id, version_id)
+    version = queries.read_draft(support_actor(request.session), material_id, version_id)
     if as_json(request):
         return JsonResponse({"material": queries.material_data(version.material), "draft": queries.draft_data(version)})
+    return draft_page(request, version, error=error, save_conflict=bool(error))
+
+
+def draft_page(request, version, *, error=None, save_conflict=False):
+    state = preparation.preparation_data(version.current_preparation)
+    snapshot = version.current_preparation.snapshot if state["status"] == "source_prepared" else None
+    origin = getattr(version, "support_origin", None)
+    origin_ticket_id = None
+    if origin and allowed_communities(support_actor(request.session)).filter(cursor_id=origin.ticket.dialog.cursor_id).exists():
+        origin_ticket_id = origin.ticket_id
+    current = None
+    if version.base_publication_revision != version.material.publication_revision and version.sealed_at is None:
+        current = MaterialVersion.objects.filter(material=version.material, is_published=True).select_related(
+            "published_prepared_snapshot",
+        ).first()
     return render_page(request, "draft", {
-        "material": version.material, "version": version, "operation_id": uuid4(),
-        "form_values": form_values(request=request) if error else form_values(version),
+        "material": version.material, "version": version, "operation_id": uuid4(), "prepare_operation_id": uuid4(),
+        "publication_operation_id": uuid4(), "rebase_operation_id": uuid4(), "current_publication": current, "origin_ticket_id": origin_ticket_id,
+        "preparation": state, "snapshot": snapshot,
+        "form_values": form_values(request=request) if save_conflict else form_values(version),
         "error_message": ERROR_MESSAGES.get(error.code, "Действие недоступно.") if error else None,
-        "show_comparison": bool(error and error.code == "draft_revision_conflict"),
+        "show_comparison": bool(save_conflict and error.code == "draft_revision_conflict"),
     }, status=error.status if error else 200)
+
+
+@private
+@require_http_methods(["POST"])
+def prepare(request, material_id, version_id):
+    support_actor(request.session)
+    check_ids(material_id, version_id)
+    try:
+        data = json_object(request, ["client_operation_id", "expected_draft_revision"])
+        revision = expected_revision(data) if request.content_type == "application/x-www-form-urlencoded" else data["expected_draft_revision"]
+        record, replayed = preparation.request_preparation(
+            request.session, material_id, version_id, data["client_operation_id"], revision,
+        )
+    except AccessError as error:
+        if as_json(request) or error.status not in (400, 409, 422):
+            raise
+        return draft_page(request, queries.read_draft(support_actor(request.session), material_id, version_id), error=error)
+    version = queries.read_draft(support_actor(request.session), material_id, version_id)
+    if as_json(request):
+        state = preparation.preparation_data(record)
+        return JsonResponse({
+            "operation": {"client_operation_id": str(data["client_operation_id"]), "action": "prepare", "replayed": replayed},
+            "preparation": state, "draft": queries.draft_data(version),
+        }, status=202 if state["status"] == "preparing" else 200)
+    return HttpResponseRedirect(reverse("knowledge-draft", args=[material_id, version_id]), status=303)
+
+
+def command_number(request, data, key, *, minimum=0):
+    value = data[key]
+    if isinstance(value, str) and (request.content_type == "application/x-www-form-urlencoded" or key.endswith("_id")):
+        if not (value.isascii() and value.isdecimal() and len(value) <= 19):
+            raise AccessError("invalid_request", 400)
+        value = int(value)
+    publication.validate_revision(value, minimum=minimum)
+    return value
+
+
+@private
+@require_http_methods(["POST"])
+def publication_command(request, material_id, action):
+    support_actor(request.session)
+    check_ids(material_id)
+    required = ["client_operation_id", "version_id", "expected_publication_revision"]
+    if action == "publish":
+        required.append("prepared_snapshot_id")
+    data = json_object(request, required)
+    version_id = command_number(request, data, "version_id", minimum=1)
+    revision = command_number(request, data, "expected_publication_revision")
+    snapshot_id = command_number(request, data, "prepared_snapshot_id", minimum=1) if action == "publish" else None
+    try:
+        event, replayed = publication.change_publication(
+            request.session, material_id, version_id, data["client_operation_id"], revision, snapshot_id=snapshot_id,
+        )
+    except AccessError as error:
+        if as_json(request) or error.status != 409:
+            raise
+        return draft_page(request, queries.read_draft(support_actor(request.session), material_id, version_id), error=error)
+    if as_json(request):
+        return JsonResponse({
+            "operation": {"client_operation_id": str(data["client_operation_id"]), "action": action, "replayed": replayed},
+            "event": {"id": str(event.pk), "publication_revision": event.publication_revision,
+                      "previous_version_id": str(event.previous_version_id) if event.previous_version_id else None,
+                      "next_version_id": str(event.next_version_id) if event.next_version_id else None,
+                      "prepared_snapshot_id": str(event.snapshot_id), "created_at": event.created_at},
+            "material": queries.material_data(Material.objects.get(pk=material_id)),
+        })
+    return HttpResponseRedirect(reverse("knowledge-draft", args=[material_id, version_id]), status=303)
+
+
+@private
+@require_http_methods(["POST"])
+def rebase(request, material_id, version_id):
+    support_actor(request.session)
+    check_ids(material_id, version_id)
+    data = json_object(request, ["client_operation_id", "expected_draft_revision", "expected_publication_revision"])
+    draft_revision = command_number(request, data, "expected_draft_revision", minimum=1)
+    publication_revision = command_number(request, data, "expected_publication_revision")
+    try:
+        command, replayed = publication.rebase_draft(
+            request.session, material_id, version_id, data["client_operation_id"], draft_revision, publication_revision,
+        )
+    except AccessError as error:
+        if as_json(request) or error.status != 409:
+            raise
+        return draft_page(request, queries.read_draft(support_actor(request.session), material_id, version_id), error=error)
+    return command_response(request, command, replayed)
+
+
+@private
+@require_http_methods(["GET", "POST"])
+def from_support(request):
+    actor = support_actor(request.session)
+    if request.method == "GET":
+        value = request.GET.get("ticket_id", "")
+        if not (value.isascii() and value.isdecimal() and len(value) <= 19):
+            raise AccessError("invalid_request", 400)
+        ticket_id = int(value)
+        check_ids(ticket_id)
+        ticket = services.support_ticket(actor, ticket_id)
+        questions, answers = services.eligible_messages(ticket)
+        return render_page(request, "from_support", {
+            "ticket": ticket, "questions": questions.order_by("-pk")[:100], "answers": answers.order_by("-pk")[:100],
+            "materials": services.visible_materials(actor).order_by("-pk")[:100], "operation_id": uuid4(),
+        })
+    data = json_object(request, ["client_operation_id", "ticket_id", "question_id", "answer_id"], ["material_id"])
+    ticket_id = command_number(request, data, "ticket_id", minimum=1)
+    question_id = command_number(request, data, "question_id", minimum=1)
+    answer_id = command_number(request, data, "answer_id", minimum=1)
+    material_id = command_number(request, data, "material_id", minimum=1) if data.get("material_id") not in ("", None) else None
+    command, replayed = services.create_from_support(
+        request.session, data["client_operation_id"], ticket_id, question_id, answer_id, material_id,
+    )
+    return command_response(request, command, replayed, created=True)

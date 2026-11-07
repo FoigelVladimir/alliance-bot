@@ -39,8 +39,20 @@
     </details>
   {% else %}
     {% include "support/fragments.html" with fragment="header" %}
+    <a class="mt-4 inline-flex min-h-12 items-center underline" href="{% url 'knowledge-from-support' %}?ticket_id={{ ticket.pk|unlocalize }}">Создать черновик материала из обращения</a>
     <p class="mt-3 text-sm" data-new-history hidden>Появились изменения в последних записях. <a class="underline" href="{% url 'support-ticket' ticket.pk %}">К последним записям</a></p>
     {% include "support/fragments.html" %}
+    <section class="mt-6" aria-labelledby="knowledge-search-title">
+      <h2 id="knowledge-search-title" class="text-xl font-semibold">Поиск в базе знаний</h2>
+      <form class="mt-3 flex flex-wrap gap-3" method="get" action="{% url 'support-knowledge-search' ticket.pk %}" data-knowledge-search>
+        <label class="min-w-48 flex-1">Запрос
+          <input class="mt-2 block w-full border border-neutral-400 p-2" name="q" maxlength="500" required>
+        </label>
+        <button class="min-h-12 self-end border border-neutral-700 px-3 py-2 font-semibold hover:bg-neutral-100 focus-visible:outline-2 focus-visible:outline-offset-2" type="submit">Найти</button>
+      </form>
+      <p class="mt-2 text-sm" data-knowledge-status role="status"></p>
+      <ul class="mt-3 space-y-4" data-knowledge-results></ul>
+    </section>
     <section class="mt-8 border-t border-neutral-300 pt-6" data-editor-slot>
       {% if can_send %}
         <h2 class="text-balance text-2xl font-semibold">Ответ менеджера</h2>

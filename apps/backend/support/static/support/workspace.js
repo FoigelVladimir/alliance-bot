@@ -176,3 +176,55 @@ if (workspace) {
     },
   });
 }
+
+
+const knowledgeForm = document.querySelector("[data-knowledge-search]");
+knowledgeForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const section = knowledgeForm.parentElement;
+  const status = section.querySelector("[data-knowledge-status]");
+  const results = section.querySelector("[data-knowledge-results]");
+  const submit = knowledgeForm.querySelector("button");
+  const url = new URL(knowledgeForm.action);
+  url.search = new URLSearchParams(new FormData(knowledgeForm)).toString();
+  submit.disabled = true;
+  status.textContent = "Ищем материалы…";
+  results.replaceChildren();
+  try {
+    const { results: matches } = await requestJson(url.href);
+    status.textContent = matches.length ? "" : "Подходящих материалов не найдено.";
+    for (const match of matches) {
+      const row = document.createElement("li");
+      const link = document.createElement("a");
+      link.className = "underline font-semibold";
+      link.href = match.source_url;
+      link.textContent = match.title;
+      const content = document.createElement("p");
+      content.className = "mt-2 whitespace-pre-wrap break-words";
+      content.textContent = match.content;
+      row.append(link, content);
+      if (document.querySelector("[data-send-response] textarea[name=text]")) {
+        const insert = document.createElement("button");
+        insert.type = "button";
+        insert.className = "mt-2 min-h-12 underline";
+        insert.textContent = "Вставить в черновик";
+        insert.addEventListener("click", () => {
+          const textarea = document.querySelector("[data-send-response] textarea[name=text]");
+          if (!textarea || textarea.disabled || textarea.readOnly) {
+            status.textContent = "Черновик сейчас недоступен для редактирования.";
+            return;
+          }
+          textarea.value += (textarea.value ? "\n\n" : "") + match.content;
+          textarea.dispatchEvent(new Event("input", { bubbles: true }));
+          textarea.focus();
+        });
+        row.append(insert);
+      }
+      results.append(row);
+    }
+  } catch {
+    status.textContent = "Поиск сейчас недоступен. Попробуйте ещё раз.";
+  } finally {
+    submit.disabled = false;
+  }
+});

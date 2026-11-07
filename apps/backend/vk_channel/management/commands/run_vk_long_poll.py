@@ -10,7 +10,7 @@ from vk_channel.services import InvalidBatch, ReaderLeaseLost, claim_reader, pol
 
 
 class Command(BaseCommand):
-    help = "Принимать сообщения тестового сообщества через VK Bots Long Poll."
+    help = "Принимать события одного пилотного диалога через VK Bots Long Poll."
 
     def add_arguments(self, parser):
         parser.add_argument("--once", action="store_true")
@@ -22,7 +22,11 @@ class Command(BaseCommand):
         if not value.isascii() or not value.isdecimal() or len(value) > 19 or not valid_id(int(value)):
             raise CommandError("Укажите VK_GROUP_ID сообщества.")
 
+        peer = settings.VK_LONG_POLL_PILOT_PEER_ID
+        if not peer.isascii() or not peer.isdecimal() or len(peer) > 19 or not valid_id(int(peer)):
+            raise CommandError("Укажите числовой VK_LONG_POLL_PILOT_PEER_ID тестового диалога.")
         community_id = int(value)
+        pilot_peer_id = int(peer)
         discover = partial(long_poll_server, settings.VK_ACCESS_TOKEN, community_id)
         reader = server = None
         delay = 1
@@ -35,7 +39,7 @@ class Command(BaseCommand):
                         server = discover()
                         reader = claim_reader(community_id, server.position)
                     if reader is not None:
-                        reader, server = poll_once(reader, server, read_long_poll, discover)
+                        reader, server = poll_once(reader, server, read_long_poll, discover, pilot_peer_id=pilot_peer_id)
                     if options["once"]:
                         return
                     delay = 1

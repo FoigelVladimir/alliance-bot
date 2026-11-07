@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Попытка обработки · Альянс{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-4xl px-4 py-8 sm:px-6">
+  <a class="inline-flex min-h-12 items-center underline" href="{% url 'support-ai-journal' %}">К журналу автоматической помощи</a>
+  <h1 class="mt-3 text-3xl font-semibold">Попытка №{{ run.pk }}</h1>
+  <p class="mt-3">{{ run.finished_at|date:"d.m.Y, H:i" }} · {{ reason }}</p>
+  {% if ticket %}
+    <a class="mt-3 inline-flex min-h-12 items-center underline" href="{% url 'support-ticket' ticket.pk %}">Перейти к обращению №{{ ticket.pk }}</a>
+  {% endif %}
+  {% for input in run.inputs.all %}
+    <section class="mt-6 border border-neutral-300 p-4">
+      <h2 class="text-xl font-semibold">Вопрос · версия {{ input.request_version }}</h2>
+      <p class="mt-3 whitespace-pre-wrap break-words">{{ input.question_text }}</p>
+    </section>
+  {% endfor %}
+  {% if run.answer_id %}
+    <section class="mt-6 border border-neutral-300 p-4">
+      <h2 class="text-xl font-semibold">Сохранённый ответ</h2>
+      {% for part in run.answer.parts.all %}
+        <p class="mt-3 text-sm text-neutral-700">
+          {% with status=part.aipartdelivery.status %}
+            {% if status == "waiting" %}Ожидает отправки
+            {% elif status == "pending" %}Поставлена в очередь
+            {% elif status == "sent" %}Принята ВК
+            {% elif status == "unknown_outcome" %}Исход неизвестен
+            {% elif status == "cancelled" %}Отменена
+            {% elif status == "failed" %}Отправка завершилась ошибкой{% endif %}
+          {% endwith %}
+        </p>
+        <p class="mt-3 whitespace-pre-wrap break-words">{{ part.text_snapshot }}</p>
+      {% endfor %}
+    </section>
+  {% endif %}
+</main>
+{% endblock %}

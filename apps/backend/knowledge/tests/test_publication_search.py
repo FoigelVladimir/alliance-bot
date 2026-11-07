@@ -5,14 +5,23 @@ from unittest.mock import patch
 from uuid import uuid4
 from urllib.parse import urlencode
 
-from django.db import connections
+from django.db import connections, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 
 from accounts.models import StaffProfile
 from accounts.services import AccessError
-from knowledge.models import Material, MaterialCommand, MaterialVersion
+from jobs.models import BackgroundTask
+from jobs.services import LeaseLost, claim
+from jobs.worker import run_one
+from knowledge.indexing import TASK_TYPE as INDEX_TASK_TYPE, index_snapshot_task
+from knowledge.models import DocumentFragment, Material, MaterialCommand, MaterialVersion, PublicationEvent, SourceSnapshot, SupportOrigin
+from knowledge.publication import isolate_restored_publications
+from knowledge.search import SearchHit, rank_fragments, sources_are_current
+from knowledge.preparation import TASK_TYPE, prepare_text_task
 from knowledge.services import create_material, save_draft
+from support.delivery import run_sender_once
+from support.models import Dialog, Message, SupportMembership, Ticket
 from support.services import grant_support_membership
 from support.tests.test_http import signed_in
 from vk_channel.models import LongPollCursor
@@ -248,3 +257,301 @@ class TextDraftConcurrencyTests(KnowledgeSetup, TransactionTestCase):
         self.assertEqual(result[0][0], result[1][0])
         self.assertCountEqual([row[1] for row in result], [True, False])
         self.assertEqual((Material.objects.count(), MaterialVersion.objects.count()), (1, 1))
+
+
+@override_settings(DEBUG=True)
+class TextPreparationTests(KnowledgeSetup, TransactionTestCase):
+    def prepare(self, version, *, revision=1, operation=None):
+        return self.client.post(self.url(version) + "prepare/", {
+            "client_operation_id": str(operation or uuid4()), "expected_draft_revision": revision,
+        }, content_type="application/json")
+
+    def test_prepares_exact_saved_text_and_replays_even_after_a_later_edit(self):
+        text = "  <script>исходный текст</script> 🙂\n"
+        self.create(content={**self.content, "source_text": text})
+        version = MaterialVersion.objects.get()
+        operation = uuid4()
+        first = self.prepare(version, operation=operation)
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(self.prepare(version, operation=operation).json()["preparation"]["id"],
+                         first.json()["preparation"]["id"])
+        self.assertEqual(self.prepare(version).json()["error"]["code"], "preparation_in_progress")
+        self.assertTrue(run_one({TASK_TYPE: prepare_text_task}))
+        page = self.client.get(self.url(version))
+        self.assertContains(page, "&lt;script&gt;исходный текст&lt;/script&gt;")
+        self.assertNotContains(page, "<script>исходный текст</script>")
+        self.assertEqual(SourceSnapshot.objects.get().prepared_text, text)
+
+        self.save(version, text="Вторая ревизия")
+        replay = self.prepare(version, operation=operation)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.json()["preparation"]["status"], "source_prepared")
+        self.assertEqual(replay.json()["draft"]["preparation_status"], "not_prepared")
+        self.assertEqual(replay.json()["draft"]["draft_revision"], 2)
+        self.assertEqual(Material.objects.get().publication_revision, 0)
+
+    def test_edit_revokes_old_worker_and_empty_source_has_no_snapshot(self):
+        self.create()
+        version = MaterialVersion.objects.get()
+        operation = uuid4()
+        self.assertEqual(self.prepare(version, operation=operation).status_code, 202)
+        old_task = claim([TASK_TYPE])
+        save_snapshot = prepare_text_task(old_task)
+        self.assertEqual(self.save(version, text=" \n ").status_code, 200)
+        with self.assertRaises(LeaseLost), transaction.atomic():
+            save_snapshot()
+        old_task.refresh_from_db()
+        self.assertIsNone(old_task.lease_token)
+        self.assertEqual(old_task.result["reason"], "superseded")
+        self.assertEqual(self.prepare(version, operation=operation).json()["preparation"]["reason"], "superseded")
+        self.assertEqual(self.prepare(version, revision=2).status_code, 202)
+        self.assertTrue(run_one({TASK_TYPE: prepare_text_task}))
+        self.assertContains(self.client.get(self.url(version)), "Источник пуст.")
+        self.assertFalse(SourceSnapshot.objects.exists())
+
+    def test_expired_last_lease_reports_terminal_failure(self):
+        self.create()
+        version = MaterialVersion.objects.get()
+        self.prepare(version)
+        task = claim([TASK_TYPE])
+        BackgroundTask.objects.filter(pk=task.pk).update(
+            locked_until=timezone.now(), attempt_count=task.max_attempts,
+        )
+        self.assertFalse(run_one({TASK_TYPE: prepare_text_task}))
+        draft = self.client.get(self.url(version), HTTP_ACCEPT="application/json").json()["draft"]
+        self.assertEqual(draft["preparation_status"], "failed")
+        self.assertEqual(draft["preparation"]["reason"], "attempt_budget_exhausted")
+        self.assertFalse(SourceSnapshot.objects.exists())
+
+
+    def test_index_generation_preserves_text_and_remains_inactive(self):
+        text = ("Тренировка по баскетболу. Запись через капитана.\n" * 150) + "Последняя строка."
+        self.create(content={**self.content, "source_text": text})
+        version = MaterialVersion.objects.get()
+        self.prepare(version)
+        run_one({TASK_TYPE: prepare_text_task})
+
+        class FakeEmbedder:
+            def token_count(self, fragment):
+                return len(fragment)
+
+            def passages(self, fragments):
+                return [[1.0, *([0.0] * 383)] for _ in fragments]
+
+        with patch("knowledge.indexing.get_embedder", return_value=FakeEmbedder()):
+            self.assertTrue(run_one({INDEX_TASK_TYPE: index_snapshot_task}))
+        fragments = list(DocumentFragment.objects.order_by("position"))
+        self.assertGreater(len(fragments), 1)
+        self.assertEqual("".join(fragment.content for fragment in fragments), text)
+        self.assertFalse(any(fragment.is_active for fragment in fragments))
+        self.assertTrue(all(len(fragment.content) <= 400 for fragment in fragments))
+        self.assertTrue(all(fragment.search_vector for fragment in fragments))
+        draft = self.client.get(self.url(version), HTTP_ACCEPT="application/json").json()["draft"]
+        self.assertEqual(draft["preparation"]["index_status"], "ready")
+
+    def test_edit_revokes_index_lease_before_fragments_can_be_written(self):
+        self.create()
+        version = MaterialVersion.objects.get()
+        self.prepare(version)
+        run_one({TASK_TYPE: prepare_text_task})
+        task = claim([INDEX_TASK_TYPE])
+
+        class FakeEmbedder:
+            def token_count(self, fragment):
+                return len(fragment)
+
+            def passages(self, fragments):
+                return [[1.0, *([0.0] * 383)] for _ in fragments]
+
+        with patch("knowledge.indexing.get_embedder", return_value=FakeEmbedder()):
+            save_generation = index_snapshot_task(task)
+        self.assertEqual(self.save(version).status_code, 200)
+        with self.assertRaises(LeaseLost), transaction.atomic():
+            save_generation()
+        task.refresh_from_db()
+        self.assertIsNone(task.lease_token)
+        self.assertEqual(task.result["reason"], "superseded")
+        self.assertFalse(DocumentFragment.objects.exists())
+
+    def test_incomplete_vectors_never_mark_index_ready(self):
+        self.create()
+        version = MaterialVersion.objects.get()
+        self.prepare(version)
+        run_one({TASK_TYPE: prepare_text_task})
+
+        class IncompleteEmbedder:
+            def token_count(self, fragment):
+                return len(fragment)
+
+            def passages(self, fragments):
+                return []
+
+        with (patch("knowledge.indexing.get_embedder", return_value=IncompleteEmbedder()),
+              self.assertLogs("jobs.worker", level="ERROR")):
+            self.assertTrue(run_one({INDEX_TASK_TYPE: index_snapshot_task}))
+        draft = self.client.get(self.url(version), HTTP_ACCEPT="application/json").json()["draft"]
+        self.assertEqual(draft["preparation"]["index_status"], "failed")
+        self.assertFalse(DocumentFragment.objects.exists())
+
+
+    def test_publication_rebase_replacement_and_old_unpublish_replay(self):
+        self.create()
+        first = MaterialVersion.objects.get()
+        self.other_client.post(f"/knowledge/materials/{first.material_id}/drafts/", {
+            "client_operation_id": str(uuid4()), **{**self.content, "source_text": "Новое расписание тренировок"},
+        }, content_type="application/json")
+        second = MaterialVersion.objects.exclude(pk=first.pk).get()
+        first_snapshot = self.build_index(first)
+        old_second_snapshot = self.build_index(second)
+        vector = [1.0, *([0.0] * 383)]
+        self.assertEqual(rank_fragments("текст", vector), [])
+
+        first_publish = self.publication_command(first, "publish", 0, snapshot=first_snapshot.pk)
+        self.assertEqual(first_publish.status_code, 200)
+        hits = rank_fragments("текст", vector)
+        self.assertTrue(hits)
+        self.assertEqual({hit.snapshot_id for hit in hits}, {first_snapshot.pk})
+        with transaction.atomic():
+            self.assertTrue(sources_are_current(hits))
+        self.assertContains(self.client.get(self.url(first)), "Снять с публикации")
+
+        stale = self.publication_command(second, "publish", 1, snapshot=old_second_snapshot.pk)
+        self.assertEqual(stale.json()["error"]["code"], "draft_base_changed")
+        rebase = self.client.post(self.url(second) + "rebase/", {
+            "client_operation_id": str(uuid4()), "expected_draft_revision": 1, "expected_publication_revision": 1,
+        }, content_type="application/json")
+        self.assertEqual(rebase.status_code, 200)
+        self.assertEqual(rebase.json()["draft"]["source_text"], "Новое расписание тренировок")
+        second_snapshot = self.build_index(second, revision=2)
+        wrong = self.publication_command(second, "publish", 1, snapshot=old_second_snapshot.pk)
+        self.assertEqual(wrong.json()["error"]["code"], "prepared_snapshot_changed")
+
+        with patch("knowledge.publication.PublicationEvent.objects.create", side_effect=RuntimeError("save failure")):
+            with self.assertRaises(RuntimeError):
+                self.publication_command(second, "publish", 1, snapshot=second_snapshot.pk)
+        self.assertEqual(rank_fragments("текст", vector), hits)
+        unpublish_id = uuid4()
+        self.assertEqual(self.publication_command(first, "unpublish", 1, operation=unpublish_id).status_code, 200)
+        self.assertEqual(rank_fragments("текст", vector), [])
+        with transaction.atomic():
+            self.assertFalse(sources_are_current(hits))
+
+        # Rebase to the new publication revision and publish the fresh snapshot.
+        self.client.post(self.url(second) + "rebase/", {
+            "client_operation_id": str(uuid4()), "expected_draft_revision": 2, "expected_publication_revision": 2,
+        }, content_type="application/json")
+        replacement = self.build_index(second, revision=3)
+        self.assertEqual(self.publication_command(second, "publish", 2, snapshot=replacement.pk).status_code, 200)
+        replay = self.publication_command(first, "unpublish", 1, operation=unpublish_id).json()
+        self.assertTrue(replay["operation"]["replayed"])
+        self.assertEqual(replay["material"]["published_version_id"], str(second.pk))
+        self.assertEqual({hit.snapshot_id for hit in rank_fragments("расписание", vector)}, {replacement.pk})
+        self.assertEqual(PublicationEvent.objects.count(), 3)
+
+    def test_restored_publication_is_hidden_after_quarantine_is_released(self):
+        self.create()
+        version = MaterialVersion.objects.get()
+        snapshot = self.build_index(version)
+        self.assertEqual(self.publication_command(version, "publish", 0, snapshot=snapshot.pk).status_code, 200)
+        vector = [1.0, *([0.0] * 383)]
+        hits = rank_fragments("текст", vector)
+        self.assertTrue(hits)
+        with self.settings(STAFF_QUARANTINE_INCIDENT="knowledge-restore"):
+            self.assertEqual(rank_fragments("текст", vector), [])
+            self.assertEqual(isolate_restored_publications(), 1)
+        self.assertEqual(rank_fragments("текст", vector), [])
+        with transaction.atomic():
+            self.assertFalse(sources_are_current(hits))
+
+    def build_index(self, version, *, revision=1):
+        self.assertEqual(self.prepare(version, revision=revision).status_code, 202)
+        run_one({TASK_TYPE: prepare_text_task})
+
+        class FakeEmbedder:
+            def token_count(self, fragment):
+                return len(fragment)
+
+            def passages(self, fragments):
+                return [[1.0, *([0.0] * 383)] for _ in fragments]
+
+        with patch("knowledge.indexing.get_embedder", return_value=FakeEmbedder()):
+            run_one({INDEX_TASK_TYPE: index_snapshot_task})
+        version.refresh_from_db()
+        return version.current_preparation.snapshot
+
+    def publication_command(self, version, action, revision, *, operation=None, snapshot=None):
+        body = {"client_operation_id": str(operation or uuid4()), "version_id": str(version.pk),
+                "expected_publication_revision": revision}
+        if snapshot is not None:
+            body["prepared_snapshot_id"] = str(snapshot)
+        return self.client.post(f"/knowledge/materials/{version.material_id}/{action}/", body,
+                                content_type="application/json")
+
+
+    def test_replacing_publication_switches_both_search_branches(self):
+        self.create()
+        first = MaterialVersion.objects.get()
+        first_snapshot = self.build_index(first)
+        self.assertEqual(self.publication_command(first, "publish", 0, snapshot=first_snapshot.pk).status_code, 200)
+        old_hits = rank_fragments("источник", [1.0, *([0.0] * 383)])
+        self.assertTrue(old_hits)
+        response = self.client.post(f"/knowledge/materials/{first.material_id}/drafts/", {
+            "client_operation_id": str(uuid4()), **{**self.content, "source_text": "Зал и расписание"},
+        }, content_type="application/json")
+        second = MaterialVersion.objects.get(pk=response.json()["draft"]["id"])
+        second_snapshot = self.build_index(second)
+        result = self.publication_command(second, "publish", 1, snapshot=second_snapshot.pk)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json()["event"]["previous_version_id"], str(first.pk))
+        new_hits = rank_fragments("источник", [1.0, *([0.0] * 383)])
+        self.assertEqual({hit.snapshot_id for hit in new_hits}, {second_snapshot.pk})
+        self.assertFalse(DocumentFragment.objects.filter(prepared_snapshot=first_snapshot, is_active=True).exists())
+        with transaction.atomic():
+            self.assertFalse(sources_are_current(old_hits))
+            self.assertTrue(sources_are_current(new_hits))
+
+
+    def test_origin_draft_is_idempotent_and_private_to_ticket_readers(self):
+        dialog = Dialog.objects.create(cursor=self.cursor, vk_peer_id=21)
+        ticket = Ticket.objects.create(dialog=dialog, current_owner=self.profile)
+        question = Message.objects.create(dialog=dialog, ticket=ticket, text="Частный вопрос студента")
+        ticket_url = f"/support/tickets/{ticket.pk}/"
+        sent = self.client.post(ticket_url + "send/", {
+            "client_operation_id": str(uuid4()), "expected_assignment_version": 1,
+            "text": "Ответ сотрудника", "source_draft": None,
+        }, content_type="application/json")
+        self.assertEqual(sent.status_code, 202)
+        self.assertTrue(run_sender_once(17, lambda *_: 667))
+        answer = Message.objects.get(ticket=ticket, direction="outbound_manager")
+        url = "/knowledge/drafts/from-support/"
+        self.assertContains(self.client.get(url, {"ticket_id": ticket.pk}), answer.text)
+        body = {"client_operation_id": str(uuid4()), "ticket_id": str(ticket.pk),
+                "question_id": str(question.pk), "answer_id": str(answer.pk)}
+        invalid = self.client.post(url, {**body, "answer_id": str(question.pk)}, content_type="application/json")
+        self.assertEqual(invalid.status_code, 404)
+        first = self.client.post(url, body, content_type="application/json")
+        replay = self.client.post(url, body, content_type="application/json")
+        self.assertEqual((first.status_code, replay.status_code), (201, 200))
+        self.assertEqual(first.json()["draft"]["id"], replay.json()["draft"]["id"])
+        origin = SupportOrigin.objects.get()
+        self.assertEqual((origin.question_id, origin.answer_id), (question.pk, answer.pk))
+        self.assertContains(self.client.get(self.url(origin.version)), "Исходное обращение")
+        self.assertEqual(rank_fragments(question.text, [1.0, *([0.0] * 383)]), [])
+        self.assertEqual(Message.objects.filter(ticket=ticket).count(), 2)
+        ticket.refresh_from_db()
+        self.assertEqual(ticket.status, Ticket.Status.OPEN)
+
+        other_cursor = LongPollCursor.objects.create(community_id=18, position="100")
+        SupportMembership.objects.filter(profile=self.other).delete()
+        grant_support_membership(self.other.pk, other_cursor.pk)
+        self.assertEqual(self.other_client.get(self.url(origin.version)).status_code, 404)
+        self.assertEqual(self.other_client.post(url, body, content_type="application/json").status_code, 404)
+        catalog = self.other_client.get("/knowledge/materials/", HTTP_ACCEPT="application/json").json()
+        self.assertEqual(catalog["total_count"], 0)
+        with patch("support.views.hybrid_search") as search:
+            self.assertEqual(self.other_client.get(ticket_url + "knowledge-search/", {"q": "секция"}).status_code, 404)
+            search.assert_not_called()
+        hit = SearchHit(1, origin.version.material_id, origin.version_id, 1, "Раздел", "Фрагмент", 0.01)
+        with patch("support.views.hybrid_search", return_value=[hit]):
+            result = self.client.get(ticket_url + "knowledge-search/", {"q": "секция"}).json()
+        self.assertEqual(result, {"results": [{"title": "Раздел", "content": "Фрагмент", "source_url": self.url(origin.version)}]})
