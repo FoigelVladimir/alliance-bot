@@ -486,6 +486,13 @@ class AIAnswerPartInput(models.Model):
         constraints = [models.UniqueConstraint(fields=["part", "input"], name="support_ai_part_input_unique")]
 
 
+class BotDeliveryRecoveryRun(models.Model):
+    id = models.UUIDField(primary_key=True)
+    incident = models.CharField(max_length=128)
+    created_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True)
+
+
 class AIPartDelivery(models.Model):
     part = models.OneToOneField(AIAnswerPart, on_delete=models.PROTECT)
     status = models.CharField(max_length=20, default="waiting")
@@ -494,9 +501,19 @@ class AIPartDelivery(models.Model):
     reason_code = models.CharField(max_length=48, blank=True)
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()
+    uncertainty_revision = models.UUIDField(null=True)
+    uncertainty_since = models.DateTimeField(null=True)
+    recovery_run = models.ForeignKey(BotDeliveryRecoveryRun, null=True, on_delete=models.PROTECT)
 
     class Meta:
         db_table = "support_ai_part_delivery"
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(uncertainty_revision__isnull=False, uncertainty_since__isnull=False)
+                | (~Q(status="unknown_outcome") & Q(uncertainty_revision__isnull=True, uncertainty_since__isnull=True)),
+                name="support_ai_uncertainty_pair",
+            ),
+        ]
 
 
 class AIPartAttempt(models.Model):

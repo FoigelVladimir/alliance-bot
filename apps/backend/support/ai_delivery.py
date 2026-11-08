@@ -1,4 +1,4 @@
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from django.db import connection, transaction
 
@@ -10,7 +10,7 @@ from storage.services import database_time
 from vk_channel.client import DeliveryRejected, DeliveryUnknown
 from vk_channel.models import LongPollCursor
 
-from .models import AIAnswer, AIAnswerInput, AIPartAttempt, AIPartDelivery, Dialog, Message
+from .models import AIAnswer, AIAnswerInput, AIPartAttempt, AIPartDelivery, BotDeliveryRecoveryRun, Dialog, Message
 from .vk_keys import reserve_random_id
 
 TASK_TYPE = "send_vk_bot_part"
@@ -111,7 +111,17 @@ def lock_attempt(task, *, verify_sources=False):
     return cursor, dialog, answer, delivery, attempt, sources_ok
 
 
+def mark_uncertainty(delivery, now, recovery_run=None):
+    if (delivery.status != "unknown_outcome" or delivery.uncertainty_revision is None
+            or recovery_run is not None and delivery.recovery_run_id != recovery_run.pk):
+        delivery.uncertainty_revision = uuid4()
+        delivery.uncertainty_since = now
+        delivery.recovery_run = recovery_run
+
+
 def set_outcome(answer, delivery, attempt, status, now, *, reason="", provider_id=None, error_code=None):
+    if status == "unknown_outcome":
+        mark_uncertainty(delivery, now)
     attempt.status = {"sent": "succeeded", "unknown_outcome": "unknown_outcome"}.get(status, "failed")
     attempt.finished_at = None if status == "unknown_outcome" else now
     attempt.reason_code, attempt.vk_error_code = reason, error_code
@@ -127,7 +137,8 @@ def set_outcome(answer, delivery, attempt, status, now, *, reason="", provider_i
     else:
         cancel_waiting(answer, "previous_part_unconfirmed", now)
     delivery.status, delivery.reason_code, delivery.updated_at = status, reason, now
-    delivery.save(update_fields=["status", "reason_code", "updated_at", "provider_message_id"])
+    delivery.save(update_fields=["status", "reason_code", "updated_at", "provider_message_id",
+                                 "uncertainty_revision", "uncertainty_since", "recovery_run"])
 
 
 @transaction.atomic
@@ -227,10 +238,26 @@ def cancel_for_handoff(answer_id, now):
             set_outcome(answer, delivery, attempt, "cancelled", now, reason="dialog_changed")
 
 
-@transaction.atomic
-def isolate_restored_bot_deliveries():
-    if not quarantine_incident():
+def isolate_restored_bot_deliveries(recovery_run_id=None):
+    incident = quarantine_incident()
+    if not incident:
         raise ValueError("Запустите команду в карантине восстановления.")
+    # Legacy invocation remains repeatable within its quarantine incident.
+    run_id = recovery_run_id or uuid5(NAMESPACE_URL, f"alliance:bot-recovery:{incident}")
+    with transaction.atomic():
+        run, _ = BotDeliveryRecoveryRun.objects.get_or_create(pk=run_id, defaults={"incident": incident})
+        if run.incident != incident:
+            raise ValueError("UUID восстановления принадлежит другому инциденту.")
+    return isolate_recovery_run(run.pk)
+
+
+@transaction.atomic
+def isolate_recovery_run(run_id):
+    run = BotDeliveryRecoveryRun.objects.select_for_update().get(pk=run_id)
+    if not quarantine_incident() or quarantine_incident() != run.incident:
+        raise ValueError("Сохраняйте карантин исходного инцидента до окончания обработки.")
+    if run.completed_at is not None:
+        return False
     answer_ids = list(AIPartDelivery.objects.filter(
         status__in=("waiting", "pending", "unknown_outcome"),
     ).order_by("part__answer_id").values_list("part__answer_id", flat=True).distinct())
@@ -240,6 +267,8 @@ def isolate_restored_bot_deliveries():
         for delivery in deliveries:
             if delivery.status not in {"waiting", "pending", "unknown_outcome"}:
                 continue
+            if delivery.provider_message_id is not None or delivery.part.message_id is not None:
+                raise ValueError("Незавершённая доставка содержит подтверждённое сообщение.")
             attempt = AIPartAttempt.objects.select_for_update().filter(delivery=delivery).first()
             if attempt is None:
                 if delivery.status == "pending" or delivery.vk_random_id is not None:
@@ -248,6 +277,8 @@ def isolate_restored_bot_deliveries():
                 task = Task.objects.select_for_update().get(pk=attempt.task_id)
                 if (delivery.status == "waiting" or delivery.vk_random_id is None or task.task_type != TASK_TYPE
                         or task.idempotency_key != attempt.operation_id
+                        or attempt.status not in {"in_flight", "unknown_outcome"}
+                        or task.status not in {Task.Status.PENDING, Task.Status.PROCESSING, Task.Status.RETRY, Task.Status.UNKNOWN}
                         or task.payload != {"delivery_id": delivery.pk, "attempt_id": attempt.pk}):
                     raise ValueError("Нарушена связь восстановленной попытки и задания.")
                 attempt.status, attempt.reason_code, attempt.finished_at = "unknown_outcome", "recovered_from_backup", None
@@ -256,5 +287,10 @@ def isolate_restored_bot_deliveries():
                     status=Task.Status.UNKNOWN, result={"reason": "recovered_from_backup"},
                     lease_token=None, locked_until=None, updated_at=now,
                 )
+            mark_uncertainty(delivery, now, run)
             delivery.status, delivery.reason_code, delivery.updated_at = "unknown_outcome", "recovered_from_backup", now
-            delivery.save(update_fields=["status", "reason_code", "updated_at"])
+            delivery.save(update_fields=["status", "reason_code", "updated_at", "uncertainty_revision",
+                                         "uncertainty_since", "recovery_run"])
+    run.completed_at = database_time()
+    run.save(update_fields=["completed_at"])
+    return True
