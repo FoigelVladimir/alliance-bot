@@ -39,6 +39,8 @@ def lock_chain(answer_id, *, verify_sources=False):
 
 
 def block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id):
+    from .handoff_plans import answer_dispatch_blocked
+
     run = answer.aiprocessingrun
     if quarantine_incident() or cursor.community_id != community_id or dialog.vk_peer_id != peer_id:
         return "channel_unavailable"
@@ -46,6 +48,8 @@ def block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id):
         return "channel_paused"
     if dialog.mode != "ai_auto" or dialog.mode_version != answer.mode_version_snapshot:
         return "dialog_changed"
+    if answer_dispatch_blocked(answer.pk):
+        return "handoff_deadline"
     if any(item.request.request_version != item.request_version_snapshot
            for item in answer.inputs.select_related("request")):
         return "question_changed"
@@ -82,6 +86,9 @@ def schedule_part(answer_id, community_id, peer_id):
     now = database_time()
     if reason:
         cancel_waiting(answer, reason, now)
+        from .handoff_plans import answer_outcome_changed
+
+        answer_outcome_changed(answer.pk)
         return True
     # Allocate the row ID before building the task that references it.
     with connection.cursor() as db:
@@ -131,7 +138,7 @@ def set_outcome(answer, delivery, attempt, status, now, *, reason="", provider_i
     if status == "sent":
         part = delivery.part
         part.message = Message.objects.create(
-            dialog_id=answer.dialog_id, ticket_id=answer.aiprocessingrun.handoff_ticket_id,
+            dialog_id=answer.dialog_id, ticket_id=delivery.handoff_ticket_id or answer.aiprocessingrun.handoff_ticket_id,
             direction="outbound_bot", text=part.text_snapshot, created_at=now,
         )
         part.save(update_fields=["message"])
@@ -141,6 +148,9 @@ def set_outcome(answer, delivery, attempt, status, now, *, reason="", provider_i
     delivery.status, delivery.reason_code, delivery.updated_at = status, reason, now
     delivery.save(update_fields=["status", "reason_code", "updated_at", "provider_message_id",
                                  "uncertainty_revision", "uncertainty_since", "recovery_run"])
+    from .handoff_plans import answer_outcome_changed
+
+    answer_outcome_changed(answer.pk)
 
 
 @transaction.atomic

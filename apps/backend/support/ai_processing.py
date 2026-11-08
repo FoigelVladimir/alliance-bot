@@ -18,7 +18,7 @@ from vk_channel.models import LongPollCursor
 from .ai_delivery import cancel_for_handoff
 from .ai_generation import ModelUnavailable, generate_quote, save_answer
 from .models import (
-    AIProcessingInput, AIProcessingInputMessage, AIProcessingRun, AIRequest, AIRequestMessage,
+    AIPartDelivery, AIProcessingInput, AIProcessingInputMessage, AIProcessingRun, AIRequest, AIRequestMessage,
     Dialog, InboundRoute, Message,
 )
 
@@ -84,6 +84,11 @@ def begin_lookup(cursor, dialog, route, message):
         for message_id in request.message_links.values_list("message_id", flat=True)
     ])
     route.status, route.reason = "ai_processing", ""
+    from .handoff_plans import refresh_dialog_plans
+
+    refresh_dialog_plans(cursor, dialog)
+    if dialog.mode != "ai_auto":
+        route.refresh_from_db(fields=["status", "reason"])
     return True
 
 
@@ -119,6 +124,12 @@ def return_for_review(run, status, now):
 def finish_lookup(run, reason, now, hits=()):
     record_no_answer(run, reason, now, hits)
     return_for_review(run, "failed" if reason != "superseded" else "stale_cancelled", now)
+    from .handoff_plans import ensure_handoff, evaluate_plan
+
+    if reason == "no_reliable_basis" and settings.SUPPORT_AI_HANDOFF_ENABLED:
+        ensure_handoff(run)
+    elif run.handoff_plan_id:
+        evaluate_plan(run.handoff_plan_id)
 
 
 @transaction.atomic
@@ -188,7 +199,9 @@ def run_lookup_once(search=hybrid_search, generate=generate_quote):
             cursor, dialog, locked, sources_current = lock_run(run.pk, hits)
             now = database_time()
             blocked = lookup_block_reason(cursor, dialog, locked, now)
-            if blocked:
+            established_handoff = (settings.SUPPORT_AI_HANDOFF_ENABLED and reason == "no_reliable_basis"
+                                   and blocked == "processing_budget_exhausted")
+            if blocked and not established_handoff:
                 reason, hits, quote = blocked, [], None
             elif not sources_current:
                 reason, hits, quote = "sources_changed", [], None
@@ -218,12 +231,12 @@ def lookup_block_reason(cursor, dialog, run, now):
     return ""
 
 
-def handoff_active_requests(cursor, dialog, ticket):
+def handoff_active_requests(cursor, dialog, ticket, *, reason="student_requested_manager", planned_request_ids=()):
     """Link active questions to the card while the caller still holds the mode locks."""
     now = database_time()
     active = AIRequest.objects.filter(
-        Q(status="pending") | Q(status="answered_full", aianswerinput__answer__parts__aipartdelivery__status__in=(
-            "waiting", "pending", "unknown_outcome",
+        Q(pk__in=planned_request_ids) | Q(status__in=("pending", "failed")) | Q(status="answered_full", aianswerinput__answer__parts__aipartdelivery__status__in=(
+            "waiting", "pending", "unknown_outcome", "failed", "cancelled",
         )),
         dialog=dialog, mode_version=dialog.mode_version, automation_epoch=cursor.automation_epoch,
     )
@@ -235,8 +248,8 @@ def handoff_active_requests(cursor, dialog, ticket):
     )
     message_ids = list(messages.values_list("pk", flat=True))
     messages.update(ticket=ticket)
-    InboundRoute.objects.filter(message_id__in=message_ids, status__in=("ai_processing", "needs_review")).update(
-        status="attached", reason="student_requested_manager",
+    InboundRoute.objects.filter(message_id__in=message_ids, status__in=("pending", "ai_processing", "needs_review")).update(
+        status="attached", reason=reason,
     )
     for run in AIProcessingRun.objects.filter(inputs__request_id__in=request_ids, status="running").distinct():
         Task.objects.filter(pk=run.task_id).update(
@@ -253,5 +266,7 @@ def handoff_active_requests(cursor, dialog, ticket):
     for run in saved:
         run.handoff_ticket = ticket
         run.save(update_fields=["handoff_ticket"])
+        AIPartDelivery.objects.filter(part__answer_id=run.answer_id).update(handoff_ticket=ticket)
+        Message.objects.filter(ai_answer_part__answer_id=run.answer_id, ticket__isnull=True).update(ticket=ticket)
         cancel_for_handoff(run.answer_id, now)
     AIRequest.objects.filter(pk__in=request_ids).update(status="escalated_to_human", finished_at=now)

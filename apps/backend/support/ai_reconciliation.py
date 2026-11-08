@@ -41,9 +41,13 @@ def lock_delivery(delivery_id):
     dialog_id, answer_id = AIPartDelivery.objects.filter(pk=delivery_id).values_list(
         "part__answer__dialog_id", "part__answer_id",
     ).get()
+    cursor_id = Dialog.objects.values_list("cursor_id", flat=True).get(pk=dialog_id)
+    LongPollCursor.objects.select_for_update().get(pk=cursor_id)
     dialog = Dialog.objects.select_for_update().get(pk=dialog_id)
     run = AIProcessingRun.objects.get(answer_id=answer_id)
-    ticket = Ticket.objects.select_for_update().get(pk=run.handoff_ticket_id) if run.handoff_ticket_id else None
+    ticket_id = (AIPartDelivery.objects.values_list("handoff_ticket_id", flat=True).get(pk=delivery_id)
+                 or run.handoff_ticket_id)
+    ticket = Ticket.objects.select_for_update().get(pk=ticket_id) if ticket_id else None
     if run.dialog_id != dialog.pk or ticket is not None and ticket.dialog_id != dialog.pk:
         raise AccessError("reconciliation_state_inconsistent", 409)
     answer = AIAnswer.objects.select_for_update().get(pk=answer_id)
@@ -136,7 +140,8 @@ def check_data(check):
 
 def delivery_state(actor, delivery):
     run = AIProcessingRun.objects.get(answer_id=delivery.part.answer_id)
-    ticket = Ticket.objects.filter(pk=run.handoff_ticket_id).first() if run.handoff_ticket_id else None
+    ticket_id = delivery.handoff_ticket_id or run.handoff_ticket_id
+    ticket = Ticket.objects.filter(pk=ticket_id).first() if ticket_id else None
     check = delivery.reconciliations.filter(target_revision=delivery.uncertainty_revision).order_by("-pk").first()
     return {"part_id": str(delivery.part_id), "status": delivery.status,
             "uncertainty_revision": str(delivery.uncertainty_revision) if delivery.uncertainty_revision else None,

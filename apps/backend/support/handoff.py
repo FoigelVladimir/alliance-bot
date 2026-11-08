@@ -36,7 +36,10 @@ def route_live_message(cursor, dialog, route, message):
     ticket = Ticket.objects.select_for_update().filter(dialog=dialog, status=Ticket.Status.OPEN).first()
     if ticket is None:
         ticket = Ticket.objects.create(dialog=dialog, handoff_reason="student_requested_manager", handoff_route=route)
-    handoff_active_requests(cursor, dialog, ticket)
+    from .handoff_plans import finish_explicit_handoff
+
+    if not finish_explicit_handoff(cursor, dialog, ticket):
+        handoff_active_requests(cursor, dialog, ticket)
     # Entries already stored behind this request in the same live cycle belong to the new card.
     following = InboundRoute.objects.filter(
         Q(status="pending") | Q(status="needs_review", reason="manual_support")
@@ -50,8 +53,9 @@ def route_live_message(cursor, dialog, route, message):
     InboundRoute.objects.filter(pk__in=following_ids).update(status="attached", reason="student_requested_manager")
     message.ticket = ticket
     message.save(update_fields=["ticket"])
-    dialog.mode = "human_support"
-    dialog.mode_version += 1
-    dialog.save(update_fields=["mode", "mode_version", "updated_at"])
+    if dialog.mode == "ai_auto":
+        dialog.mode = "human_support"
+        dialog.mode_version += 1
+        dialog.save(update_fields=["mode", "mode_version", "updated_at"])
     route.status, route.reason = "attached", "student_requested_manager"
     return True

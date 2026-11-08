@@ -92,7 +92,7 @@ def generate_quote(question, hits, timeout):
             break
         offered.append(hit)
     if not offered:
-        return None
+        raise ModelUnavailable("No source fits the generation input budget")
     data = {
         "model": settings.MODEL_NAME, "temperature": 0, "max_tokens": MAX_TOKENS, "stream": False,
         "response_format": {"type": "json_object"},
@@ -112,7 +112,16 @@ def generate_quote(question, hits, timeout):
             raise ValueError
     except (OSError, ValueError) as exc:
         raise ModelUnavailable("Invalid or unavailable llama-server response") from exc
-    return parse_quote(payload, offered, round((monotonic() - started) * 1000))
+    quote = parse_quote(payload, offered, round((monotonic() - started) * 1000))
+    if quote is not None:
+        return quote
+    try:
+        choice, = payload["choices"]
+        if choice.get("finish_reason") == "stop" and json.loads(choice["message"]["content"]) == {}:
+            return None
+    except (AttributeError, KeyError, TypeError, ValueError):
+        pass
+    raise ModelUnavailable("The model did not return a valid completed decision")
 
 
 def save_answer(run, quote, hits, now, lookup_ms):
@@ -145,6 +154,10 @@ def save_answer(run, quote, hits, now, lookup_ms):
     part = AIAnswerPart.objects.create(answer=answer, position=1, text_snapshot=quote.text)
     AIAnswerPartInput.objects.create(part=part, input=answer_input)
     AIPartDelivery.objects.create(part=part, created_at=now, updated_at=now)
-    run.status, run.answer, run.finished_at = "answer_saved", answer, now
-    run.save(update_fields=["status", "answer", "finished_at"])
+    run.status, run.reason, run.answer, run.finished_at = "answer_saved", "", answer, now
+    run.save(update_fields=["status", "reason", "answer", "finished_at"])
+    from .handoff_plans import bind_answer, answer_outcome_changed
+
+    bind_answer(run)
+    answer_outcome_changed(answer.pk)
     return answer

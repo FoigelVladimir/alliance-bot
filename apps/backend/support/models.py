@@ -385,6 +385,7 @@ class AIProcessingRun(models.Model):
     automation_epoch = models.PositiveBigIntegerField()
     answer = models.OneToOneField("AIAnswer", null=True, on_delete=models.PROTECT)
     handoff_ticket = models.ForeignKey(Ticket, null=True, on_delete=models.PROTECT)
+    handoff_plan = models.ForeignKey("HandoffPlan", null=True, on_delete=models.PROTECT, related_name="runs")
     status = models.CharField(max_length=16, default="running")
     reason = models.CharField(max_length=40, blank=True)
     sources_used = models.JSONField(default=list)
@@ -497,6 +498,7 @@ class BotDeliveryRecoveryRun(models.Model):
 
 class AIPartDelivery(models.Model):
     part = models.OneToOneField(AIAnswerPart, on_delete=models.PROTECT)
+    handoff_ticket = models.ForeignKey(Ticket, null=True, on_delete=models.PROTECT)
     status = models.CharField(max_length=20, default="waiting")
     vk_random_id = models.PositiveIntegerField(null=True, unique=True)
     provider_message_id = models.PositiveBigIntegerField(null=True)
@@ -594,3 +596,42 @@ class AIPartReconciliationEvidence(models.Model):
 
     class Meta:
         db_table = "support_ai_part_reconciliation_evidence"
+
+
+class HandoffPlan(models.Model):
+    dialog = models.ForeignKey(Dialog, on_delete=models.PROTECT)
+    mode_version = models.PositiveIntegerField()
+    automation_epoch = models.PositiveBigIntegerField()
+    fingerprint = models.CharField(max_length=64, unique=True)
+    inputs_snapshot = models.JSONField()
+    budget = models.DurationField()
+    initial_deadline_at = models.DateTimeField()
+    handoff_deadline_at = models.DateTimeField()
+    timer_revision = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=12, default="pending")
+    ticket = models.ForeignKey(Ticket, null=True, on_delete=models.PROTECT, related_name="handoff_plans")
+    work_snapshot = models.JSONField(default=list)
+    created_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True)
+
+    class Meta:
+        db_table = "support_handoff_plan"
+        indexes = [models.Index(fields=["handoff_deadline_at", "id"], condition=Q(status="pending"), name="support_handoff_due")]
+        constraints = [
+            models.CheckConstraint(condition=Q(timer_revision__gte=1), name="support_handoff_revision"),
+            models.CheckConstraint(
+                condition=Q(status="pending", ticket__isnull=True, finished_at__isnull=True)
+                | Q(status="transferred", ticket__isnull=False, finished_at__isnull=False)
+                | Q(status="superseded", ticket__isnull=True, finished_at__isnull=False),
+                name="support_handoff_outcome",
+            ),
+        ]
+
+
+class HandoffPlanAnswer(models.Model):
+    plan = models.ForeignKey(HandoffPlan, on_delete=models.PROTECT, related_name="answers")
+    answer = models.OneToOneField(AIAnswer, on_delete=models.PROTECT)
+    required_part_ids = models.JSONField()
+
+    class Meta:
+        db_table = "support_handoff_plan_answer"

@@ -93,6 +93,7 @@ def ticket_detail(request, ticket_id):
         **header_context(actor, ticket), "own_draft": own_draft,
         **ticket_history(ticket, request.GET.get("before")),
         **delivery_context(actor, ticket),
+        "handoff_plans": ticket.handoff_plans.order_by("created_at", "pk")[:1],
     })
 
 
