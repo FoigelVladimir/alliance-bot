@@ -315,6 +315,8 @@ class StudentClickTests(TransactionTestCase):
         self.assertEqual(StudentClick.objects.get(provider_event_id="wrong").result["status"], "stale")
         self.assertTrue(StudentClick.objects.get(provider_event_id="again").result["replayed"])
         self.assertFalse(Message.objects.exists())
+        # Keep this transport test independent of processing speed. Expiry is tested separately.
+        StudentClick.objects.update(answer_deadline=timezone.now() + timedelta(minutes=1))
         send = Mock(side_effect=DeliveryUnknown)
         while run_click_answer_once(17, send):
             pass

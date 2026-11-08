@@ -543,3 +543,45 @@ class VKRandomReservation(models.Model):
 
     class Meta:
         db_table = "support_vk_random_reservation"
+
+
+class AIPartReconciliation(models.Model):
+    delivery = models.ForeignKey(AIPartDelivery, related_name="reconciliations", on_delete=models.PROTECT)
+    target_revision = models.UUIDField()
+    target_attempt = models.ForeignKey(AIPartAttempt, null=True, on_delete=models.PROTECT)
+    trigger = models.CharField(max_length=12)
+    actor = models.ForeignKey("accounts.StaffProfile", null=True, on_delete=models.PROTECT)
+    client_operation_id = models.UUIDField(null=True)
+    command = models.OneToOneField(SupportCommand, null=True, on_delete=models.PROTECT)
+    task = models.OneToOneField("jobs.BackgroundTask", on_delete=models.PROTECT)
+    status = models.CharField(max_length=8, default="queued")
+    outcome = models.CharField(max_length=24, blank=True)
+    reason = models.CharField(max_length=48, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    lookup_deadline_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True)
+    evidence = models.OneToOneField("AIPartReconciliationEvidence", null=True, related_name="+", on_delete=models.PROTECT)
+
+    class Meta:
+        db_table = "support_ai_part_reconciliation"
+        constraints = [
+            models.UniqueConstraint(fields=["delivery"], condition=Q(status__in=["queued", "running"]), name="ai_part_one_active_check"),
+            models.UniqueConstraint(fields=["delivery", "target_revision"], condition=Q(trigger="automatic"), name="ai_part_one_auto_revision"),
+            models.CheckConstraint(condition=Q(trigger="manual", actor__isnull=False, client_operation_id__isnull=False, command__isnull=False)
+                | Q(trigger="automatic", actor__isnull=True, client_operation_id__isnull=True, command__isnull=True), name="ai_part_check_trigger"),
+            models.CheckConstraint(condition=Q(status__in=["queued", "running"], outcome="", finished_at__isnull=True, evidence__isnull=True)
+                | Q(status="finished", outcome="unresolved", finished_at__isnull=False, evidence__isnull=True)
+                | Q(status="finished", outcome__in=["accepted_by_vk", "not_sent_verified"], finished_at__isnull=False, evidence__isnull=False),
+                name="ai_part_check_outcome"),
+        ]
+
+
+class AIPartReconciliationEvidence(models.Model):
+    reconciliation = models.OneToOneField(AIPartReconciliation, on_delete=models.PROTECT)
+    source_kind = models.CharField(max_length=32)
+    rule_version = models.PositiveIntegerField(default=1)
+    observed_at = models.DateTimeField()
+    facts = models.JSONField()
+
+    class Meta:
+        db_table = "support_ai_part_reconciliation_evidence"

@@ -3,6 +3,8 @@ from django.urls import path
 from . import ai_journal, views
 
 urlpatterns = [
+    path("ai-parts/<int:part_id>/reconcile/", views.reconcile_ai_part, name="support-ai-part-reconcile"),
+    path("ai-parts/<int:part_id>/state/", views.ai_part_state, name="support-ai-part-state"),
     path("ai-journal/", ai_journal.journal, name="support-ai-journal"),
     path("fragments/ai-journal/", ai_journal.journal, {"fragment": True}, name="support-ai-journal-fragment"),
     path("ai-answers/<int:answer_id>/", ai_journal.answer_detail, name="support-ai-answer"),

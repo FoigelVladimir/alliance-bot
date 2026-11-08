@@ -1,9 +1,11 @@
 import re
 from datetime import date, datetime, time, timedelta
+from uuid import uuid4
 
 from django.core.paginator import Paginator
 from django.http import QueryDict
 from django.shortcuts import render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_safe
 
@@ -110,6 +112,8 @@ def processing_run(request, run_id):
 @private
 @require_safe
 def answer_detail(request, answer_id):
+    from .ai_reconciliation import delivery_state
+
     actor = support_actor(request.session)
     if not 0 < answer_id < 2**63:
         raise AccessError("not_found", 404)
@@ -118,4 +122,7 @@ def answer_detail(request, answer_id):
     ).prefetch_related("inputs", "answer__parts__aipartdelivery").first()
     if run is None:
         raise AccessError("not_found", 404)
-    return render(request, "support/ai_processing_run.html", {"run": run, "reason": run_label(run)})
+    parts = [{"part": part, "state": delivery_state(actor, part.aipartdelivery), "operation_id": uuid4()}
+             for part in run.answer.parts.all()]
+    return render(request, "support/ai_processing_run.html", {"run": run, "reason": run_label(run),
+        "part_states": parts, "return_url": reverse("support-ai-answer", args=[answer_id])})

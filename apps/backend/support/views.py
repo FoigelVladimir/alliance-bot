@@ -254,6 +254,28 @@ def reconciliation_data(check):
 
 @private
 @require_POST
+def reconcile_ai_part(request, part_id):
+    from .ai_reconciliation import check_data, request_reconciliation
+
+    check_path_id(part_id)
+    data = command_data(request, [])
+    check, replayed = request_reconciliation(request.session, part_id, data["client_operation_id"])
+    return JsonResponse({"operation": operation(data, "reconcile_ai_part", replayed),
+                         "reconciliation": check_data(check)}, status=200 if check.finished_at else 202)
+
+
+@private
+@require_safe
+def ai_part_state(request, part_id):
+    from .ai_reconciliation import delivery_state, visible_delivery
+
+    actor = support_actor(request.session)
+    check_path_id(part_id)
+    return JsonResponse(delivery_state(actor, visible_delivery(actor, part_id)))
+
+
+@private
+@require_POST
 def reconcile(request, response_id):
     check_path_id(response_id)
     data = command_data(request, [])
@@ -395,6 +417,9 @@ def ticket_permissions(actor, ticket):
 @private
 @require_safe
 def ticket_state(request, ticket_id):
+    from .ai_reconciliation import delivery_state
+    from .models import AIPartDelivery
+
     check_path_id(ticket_id)
     actor = support_actor(request.session)
     ticket = read_ticket(actor, ticket_id)
@@ -407,6 +432,9 @@ def ticket_state(request, ticket_id):
     permissions = ticket_permissions(actor, ticket)
     return JsonResponse({
         "ticket": data, "permissions": permissions, "observed_at": timezone.now(),
+        "bot_deliveries": [delivery_state(actor, delivery) for delivery in AIPartDelivery.objects.filter(
+            part__answer__aiprocessingrun__handoff_ticket=ticket,
+        ).select_related("part").order_by("pk")],
         "state_key": ticket_state_key(ticket, permissions),
     })
 

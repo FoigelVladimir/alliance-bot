@@ -10,7 +10,7 @@ from storage.services import database_time
 from vk_channel.client import DeliveryRejected, DeliveryUnknown
 from vk_channel.models import LongPollCursor
 
-from .models import AIAnswer, AIAnswerInput, AIPartAttempt, AIPartDelivery, BotDeliveryRecoveryRun, Dialog, Message
+from .models import AIAnswer, AIAnswerInput, AIPartAttempt, AIPartDelivery, AIPartReconciliation, BotDeliveryRecoveryRun, Dialog, Message
 from .vk_keys import reserve_random_id
 
 TASK_TYPE = "send_vk_bot_part"
@@ -270,6 +270,13 @@ def isolate_recovery_run(run_id):
             if delivery.provider_message_id is not None or delivery.part.message_id is not None:
                 raise ValueError("Незавершённая доставка содержит подтверждённое сообщение.")
             attempt = AIPartAttempt.objects.select_for_update().filter(delivery=delivery).first()
+            checks = list(AIPartReconciliation.objects.select_for_update().filter(
+                delivery=delivery, status__in=["queued", "running"],
+            ).order_by("pk"))
+            task_ids = [check.task_id for check in checks]
+            if attempt:
+                task_ids.append(attempt.task_id)
+            list(Task.objects.select_for_update().filter(pk__in=task_ids).order_by("pk"))
             if attempt is None:
                 if delivery.status == "pending" or delivery.vk_random_id is not None:
                     raise ValueError("Нарушена связь восстановленной части и попытки.")
@@ -287,6 +294,17 @@ def isolate_recovery_run(run_id):
                     status=Task.Status.UNKNOWN, result={"reason": "recovered_from_backup"},
                     lease_token=None, locked_until=None, updated_at=now,
                 )
+            for check in checks:
+                reading = Task.objects.get(pk=check.task_id)
+                if (reading.task_type != "reconcile_vk_bot_part"
+                        or reading.payload != {"reconciliation_id": check.pk, "delivery_id": delivery.pk}
+                        or check.trigger == "manual" and reading.idempotency_key != check.client_operation_id):
+                    raise ValueError("Нарушена связь восстановленной сверки и задания.")
+                check.status, check.outcome, check.reason = "finished", "unresolved", "recovered_from_backup"
+                check.finished_at = now
+                check.save(update_fields=["status", "outcome", "reason", "finished_at"])
+                Task.objects.filter(pk=check.task_id).update(status=Task.Status.FAILED,
+                    result={"reason": "recovered_from_backup"}, lease_token=None, locked_until=None, updated_at=now)
             mark_uncertainty(delivery, now, run)
             delivery.status, delivery.reason_code, delivery.updated_at = "unknown_outcome", "recovered_from_backup", now
             delivery.save(update_fields=["status", "reason_code", "updated_at", "uncertainty_revision",
