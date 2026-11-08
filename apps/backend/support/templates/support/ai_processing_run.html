@@ -36,7 +36,7 @@
         {% endif %}
         <p class="mt-3 whitespace-pre-wrap break-words">{{ part.text_snapshot }}</p>
         {% if item.state.last_reconciliation %}
-          <p class="mt-3 text-sm">Сверка {{ item.state.last_reconciliation.id }} ·
+          <p class="mt-3 text-sm">{% if item.state.last_reconciliation.trigger == "automatic" %}Автоматическая сверка{% else %}Сверка{% endif %} {{ item.state.last_reconciliation.id }} ·
             {% if item.state.checking %}Проверка поставлена в очередь или уже идёт.
             {% elif item.state.last_reconciliation.outcome == "accepted_by_vk" %}Приём ВК подтверждён.
             {% elif item.state.last_reconciliation.outcome == "not_sent_verified" %}Неотправка подтверждена.

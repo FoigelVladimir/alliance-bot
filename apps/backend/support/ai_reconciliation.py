@@ -1,13 +1,15 @@
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import connection, transaction
+from django.db.models import Q
 
 from accounts.policies import quarantine_incident
 from accounts.services import AccessError
 from jobs.models import BackgroundTask as Task
 from jobs.services import ClockTimestamp, LeaseLost, claim, enqueue, finish, renew
 from storage.services import database_time
-from vk_channel.backfill import HistoryQuotaExceeded, use_history_quota
+from vk_channel.history import HistoryQuotaExceeded, read_history as guarded_history_read
 from vk_channel.client import DeliveryUnknown
 from vk_channel.models import LongPollCursor
 
@@ -17,11 +19,12 @@ from .models import (
     AIPartReconciliationEvidence as Evidence, AIProcessingRun, Dialog, OutgoingResponse, Ticket,
 )
 from .queries import allowed_communities
-from .reconciliation import matching_message, may_reconcile
+from .reconciliation import defer_read_task, matching_message, may_reconcile
 from .services import reserve_command, support_actor
 
 TASK_TYPE = "reconcile_vk_bot_part"
 LOOKUP_WINDOW = timedelta(minutes=2)
+SCAN_BATCH_SIZE = 25
 
 
 def visible_delivery(actor, part_id):
@@ -67,20 +70,66 @@ def request_reconciliation(session, part_id, operation_id):
         raise AccessError("reconciliation_not_required", 409)
     if Check.objects.filter(delivery=delivery, status__in=["queued", "running"]).exists():
         raise AccessError("reconciliation_in_progress", 409)
+    return enqueue_check(delivery, attempt, actor=actor, command=command), False
+
+
+def enqueue_check(delivery, attempt, *, actor=None, command=None):
     with connection.cursor() as cursor:
         cursor.execute("SELECT nextval(pg_get_serial_sequence('support_ai_part_reconciliation', 'id'))")
         check_id = cursor.fetchone()[0]
-    task = enqueue(TASK_TYPE, operation_id, {"reconciliation_id": check_id, "delivery_id": delivery.pk})
-    check = Check.objects.create(
+    check = Check(
         pk=check_id, delivery=delivery, target_revision=delivery.uncertainty_revision,
-        target_attempt=attempt, trigger="manual", actor=actor, client_operation_id=operation_id,
-        command=command, task=task, lookup_deadline_at=database_time() + LOOKUP_WINDOW,
+        target_attempt=attempt, trigger="manual" if command else "automatic", actor=actor,
+        client_operation_id=command.client_operation_id if command else None,
+        command=command, lookup_deadline_at=database_time() + LOOKUP_WINDOW,
     )
-    return check, False
+    check.task = enqueue(TASK_TYPE, check.task_key, {"reconciliation_id": check_id, "delivery_id": delivery.pk},
+                         priority=0 if command else -10)
+    check.save(force_insert=True)
+    return check
+
+
+@transaction.atomic
+def schedule_automatic(community_id, peer_id, *, history_available=False):
+    if not settings.VK_BOT_RECONCILIATION_AUTO_ENABLED or quarantine_incident():
+        return 0
+    cursor = LongPollCursor.objects.select_for_update().filter(community_id=community_id).first()
+    if cursor is None:
+        return 0
+    candidates = AIPartDelivery.objects.filter(
+        status="unknown_outcome", part__answer__dialog__cursor=cursor,
+        part__answer__dialog__vk_peer_id=peer_id, part__answer__aiprocessingrun__status="answer_saved",
+    )
+    if cursor.reconciliation_scan_since is not None:
+        candidates = candidates.filter(Q(uncertainty_since__gt=cursor.reconciliation_scan_since)
+            | Q(uncertainty_since=cursor.reconciliation_scan_since, pk__gt=cursor.reconciliation_scan_id))
+    rows = list(candidates.order_by("uncertainty_since", "pk").values_list("pk", "uncertainty_since")[:SCAN_BATCH_SIZE])
+    scheduled = 0
+    for delivery_id, _ in rows:
+        _, _, _, delivery, attempt = lock_delivery(delivery_id)
+        if delivery.status != "unknown_outcome" or delivery.uncertainty_revision is None:
+            continue
+        if (Check.objects.filter(delivery=delivery, target_revision=delivery.uncertainty_revision).exists()
+                or Check.objects.filter(delivery=delivery, status__in=["queued", "running"]).exists()):
+            continue
+        outgoing = Task.objects.select_for_update().get(pk=attempt.task_id) if attempt else None
+        if attempt is None or not outgoing_matches(outgoing, delivery, attempt):
+            continue
+        local = non_admission(delivery, attempt, outgoing)
+        if local or history_available and delivery.vk_random_id is not None:
+            enqueue_check(delivery, attempt)
+            scheduled += 1
+    if len(rows) == SCAN_BATCH_SIZE:
+        cursor.reconciliation_scan_id, cursor.reconciliation_scan_since = rows[-1]
+    else:
+        cursor.reconciliation_scan_since = cursor.reconciliation_scan_id = None
+    cursor.save(update_fields=["reconciliation_scan_since", "reconciliation_scan_id"])
+    return scheduled
 
 
 def check_data(check):
     return {"id": str(check.pk), "part_id": str(check.delivery.part_id), "status": check.status,
+            "trigger": check.trigger,
             "outcome": check.outcome or None, "reason": check.reason or None,
             "target_revision": str(check.target_revision)}
 
@@ -102,7 +151,7 @@ def lock_check(task):
         raise LeaseLost(task.pk)
     context = lock_delivery(delivery_id)
     check = Check.objects.select_for_update().get(pk=check_id)
-    if task.idempotency_key != check.client_operation_id:
+    if task.idempotency_key != check.task_key:
         raise LeaseLost(task.pk)
     return (*context, check)
 
@@ -128,6 +177,8 @@ def begin_lookup(task, community_id, peer_id):
     reason = ""
     if not target_is_current(delivery, attempt, check):
         reason = "target_changed"
+    elif check.trigger == "automatic" and not settings.VK_BOT_RECONCILIATION_AUTO_ENABLED:
+        reason = "automation_disabled"
     elif database_time() >= check.lookup_deadline_at:
         reason = "lookup_budget_exhausted"
     elif quarantine_incident() or dialog.cursor.community_id != community_id or dialog.vk_peer_id != peer_id:
@@ -214,10 +265,10 @@ def complete_lookup(task, community_id, items=None, reason=""):
 
 @transaction.atomic
 def local_parameters(task):
-    dialog, _, _, delivery, attempt, _ = lock_check(task)
+    dialog, _, _, delivery, attempt, check = lock_check(task)
     outgoing = Task.objects.get(pk=attempt.task_id) if attempt else None
     local = non_admission(delivery, attempt, outgoing)
-    return local is not None, dialog.vk_peer_id, delivery.vk_random_id is not None and attempt is not None
+    return local is not None, dialog.vk_peer_id, delivery.vk_random_id is not None and attempt is not None, check.trigger == "automatic"
 
 
 @transaction.atomic
@@ -248,49 +299,35 @@ def recover_expired():
 
 
 @transaction.atomic
-def defer_for_quota(task, community_id):
+def defer_for_quota(task, retry_at):
     _, _, _, delivery, attempt, check = lock_check(task)
-    job = Task.objects.select_for_update().get(pk=task.pk)
-    renew(task)
-    started = LongPollCursor.objects.filter(community_id=community_id).values_list("history_quota_started_at", flat=True).get()
-    now = database_time()
-    next_time = max(now + timedelta(seconds=1), started + timedelta(minutes=1)) if started else now + timedelta(seconds=1)
     if not target_is_current(delivery, attempt, check):
         finish_check(check, "unresolved", "target_changed")
         finish(task, {"reason": "target_changed"})
-    elif job.attempt_count >= job.max_attempts or next_time >= check.lookup_deadline_at:
-        finish_check(check, "unresolved", "lookup_budget_exhausted")
-        job.status = Task.Status.DEAD if job.attempt_count >= job.max_attempts else Task.Status.DONE
-        job.lease_token = job.locked_until = None
-        job.updated_at = now
-        job.save(update_fields=["status", "lease_token", "locked_until", "updated_at"])
     else:
-        check.status = "queued"
-        check.save(update_fields=["status"])
-        job.status, job.scheduled_at = Task.Status.RETRY, next_time
-        job.lease_token = job.locked_until = None
-        job.updated_at = now
-        job.save(update_fields=["status", "scheduled_at", "lease_token", "locked_until", "updated_at"])
+        defer_read_task(task, check, retry_at or database_time() + timedelta(seconds=1))
 
 
 def run_reconciliation_once(community_id, peer_id, read_history=None):
     while recover_expired():
         pass
-    task = claim([TASK_TYPE])
+    scheduled = schedule_automatic(community_id, peer_id, history_available=read_history is not None)
+    own_tasks = Check.objects.filter(delivery__part__answer__dialog__cursor__community_id=community_id,
+                                    delivery__part__answer__dialog__vk_peer_id=peer_id).values_list("task_id", flat=True)
+    task = claim([TASK_TYPE], task_ids=own_tasks)
     if task is None:
-        return False
+        return bool(scheduled)
     try:
         if not begin_lookup(task, community_id, peer_id):
             return True
-        local, target_peer, correlated = local_parameters(task)
+        local, target_peer, correlated, automatic = local_parameters(task)
         if local or read_history is None or not correlated:
             complete_lookup(task, community_id, reason="history_unavailable")
             return True
         try:
-            use_history_quota(community_id)
-            items = read_history(target_peer)
-        except HistoryQuotaExceeded:
-            defer_for_quota(task, community_id)
+            items = guarded_history_read(community_id, read_history, target_peer, automatic=automatic)
+        except HistoryQuotaExceeded as error:
+            defer_for_quota(task, error.retry_at)
         except (DeliveryUnknown, OSError):
             complete_lookup(task, community_id, reason="history_unavailable")
         else:

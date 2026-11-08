@@ -141,3 +141,4 @@ MODEL_BASE_URL = os.environ.get("MODEL_BASE_URL", "")
 MODEL_NAME = os.environ.get("MODEL_NAME", "")
 MODEL_SHA256 = os.environ.get("MODEL_SHA256", "")
 VK_BOT_SEND_ENABLED = os.environ.get("VK_BOT_SEND_ENABLED") == "1"
+VK_BOT_RECONCILIATION_AUTO_ENABLED = os.environ.get("VK_BOT_RECONCILIATION_AUTO_ENABLED") == "1"

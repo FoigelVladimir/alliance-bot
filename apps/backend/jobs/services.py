@@ -41,12 +41,14 @@ def enqueue(task_type, key, payload, *, payload_version=1, priority=0,
     return task
 
 
-def claim(task_types):
+def claim(task_types, *, task_ids=None):
     with transaction.atomic(durable=True):
-        task = (Task.objects.select_for_update(skip_locked=True)
+        candidates = (Task.objects.select_for_update(skip_locked=True)
                 .filter(task_type__in=task_types, status__in=READY, scheduled_at__lte=Now(),
-                        attempt_count__lt=F("max_attempts"))
-                .order_by("-priority", "id").first())
+                        attempt_count__lt=F("max_attempts")))
+        if task_ids is not None:
+            candidates = candidates.filter(pk__in=task_ids)
+        task = candidates.order_by("-priority", "id").first()
         if task is None:
             return None
         Task.objects.filter(pk=task.pk).update(

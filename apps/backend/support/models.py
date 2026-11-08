@@ -1,3 +1,5 @@
+from uuid import NAMESPACE_URL, uuid5
+
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -507,6 +509,7 @@ class AIPartDelivery(models.Model):
 
     class Meta:
         db_table = "support_ai_part_delivery"
+        indexes = [models.Index(fields=["uncertainty_since", "id"], condition=Q(status="unknown_outcome"), name="ai_unknown_scan")]
         constraints = [
             models.CheckConstraint(
                 condition=Q(uncertainty_revision__isnull=False, uncertainty_since__isnull=False)
@@ -561,6 +564,12 @@ class AIPartReconciliation(models.Model):
     lookup_deadline_at = models.DateTimeField()
     finished_at = models.DateTimeField(null=True)
     evidence = models.OneToOneField("AIPartReconciliationEvidence", null=True, related_name="+", on_delete=models.PROTECT)
+
+    @property
+    def task_key(self):
+        if self.trigger == "manual":
+            return self.client_operation_id
+        return uuid5(NAMESPACE_URL, f"alliance:bot-reconciliation:{self.delivery_id}:{self.target_revision}")
 
     class Meta:
         db_table = "support_ai_part_reconciliation"

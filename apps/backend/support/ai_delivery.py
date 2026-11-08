@@ -4,7 +4,7 @@ from django.db import connection, transaction
 
 from accounts.policies import quarantine_incident
 from jobs.models import BackgroundTask as Task
-from jobs.services import ClockTimestamp, LeaseLost, admit_external_call, claim, enqueue, finish
+from jobs.services import CHANNEL, ClockTimestamp, LeaseLost, admit_external_call, claim, enqueue, finish
 from knowledge.search import SearchHit, sources_are_current
 from storage.services import database_time
 from vk_channel.client import DeliveryRejected, DeliveryUnknown
@@ -117,6 +117,8 @@ def mark_uncertainty(delivery, now, recovery_run=None):
         delivery.uncertainty_revision = uuid4()
         delivery.uncertainty_since = now
         delivery.recovery_run = recovery_run
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_notify(%s, '')", [CHANNEL])
 
 
 def set_outcome(answer, delivery, attempt, status, now, *, reason="", provider_id=None, error_code=None):
@@ -298,7 +300,7 @@ def isolate_recovery_run(run_id):
                 reading = Task.objects.get(pk=check.task_id)
                 if (reading.task_type != "reconcile_vk_bot_part"
                         or reading.payload != {"reconciliation_id": check.pk, "delivery_id": delivery.pk}
-                        or check.trigger == "manual" and reading.idempotency_key != check.client_operation_id):
+                        or reading.idempotency_key != check.task_key):
                     raise ValueError("Нарушена связь восстановленной сверки и задания.")
                 check.status, check.outcome, check.reason = "finished", "unresolved", "recovered_from_backup"
                 check.finished_at = now

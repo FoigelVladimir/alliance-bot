@@ -10,32 +10,13 @@ from jobs.services import ClockTimestamp, LeaseLost, claim, finish
 from support.models import Dialog, SupportMembership
 
 from .client import DeliveryUnknown
+from .history import MAX_CALLS_PER_MINUTE, HistoryQuotaExceeded, read_history, use_history_quota
 from .models import InboundEvent, LongPollCursor, LongPollGap
 from .services import GAP_TASK, database_now, open_gap, save_historical_batch, valid_id, valid_text
 
 MAX_DIALOGS = 8
 PAGE_SIZE = 50
-MAX_CALLS_PER_MINUTE = 12
 READ_SECONDS = 35
-
-
-class HistoryQuotaExceeded(Exception):
-    pass
-
-
-@transaction.atomic
-def use_history_quota(community_id):
-    cursor = LongPollCursor.objects.select_for_update().filter(community_id=community_id).first()
-    if cursor is None:
-        raise HistoryQuotaExceeded
-    now = database_now()
-    if not cursor.history_quota_started_at or now >= cursor.history_quota_started_at + timedelta(minutes=1):
-        cursor.history_quota_started_at = now
-        cursor.history_quota_used = 0
-    if cursor.history_quota_used >= MAX_CALLS_PER_MINUTE:
-        raise HistoryQuotaExceeded
-    cursor.history_quota_used += 1
-    cursor.save(update_fields=["history_quota_started_at", "history_quota_used"])
 
 
 def inspect_history(gap, conversations, history):
@@ -53,11 +34,10 @@ def inspect_history(gap, conversations, history):
     peers = set(known[:MAX_DIALOGS + 1])
 
     def read(fetch, *args):
-        use_history_quota(community)
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError
-        response = fetch(*args, timeout=min(10, remaining))
+        response = read_history(community, fetch, *args, automatic=True, timeout=min(10, remaining))
         if monotonic() >= deadline:
             raise TimeoutError
         return response

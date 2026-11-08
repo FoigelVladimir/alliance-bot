@@ -16,6 +16,9 @@ class LongPollCursor(models.Model):
     automation_epoch = models.PositiveBigIntegerField(default=1)
     history_quota_started_at = models.DateTimeField(null=True)
     history_quota_used = models.PositiveSmallIntegerField(default=0)
+    history_auto_quota_used = models.PositiveSmallIntegerField(default=0)
+    reconciliation_scan_since = models.DateTimeField(null=True)
+    reconciliation_scan_id = models.PositiveBigIntegerField(null=True)
     automation_paused = models.BooleanField(default=False)
 
     class Meta:
@@ -24,6 +27,11 @@ class LongPollCursor(models.Model):
                 condition=Q(lease_token__isnull=True, leased_until__isnull=True)
                 | Q(lease_token__isnull=False, leased_until__isnull=False),
                 name="vk_cursor_lease_pair",
+            ),
+            models.CheckConstraint(
+                condition=Q(reconciliation_scan_since__isnull=True, reconciliation_scan_id__isnull=True)
+                | Q(reconciliation_scan_since__isnull=False, reconciliation_scan_id__isnull=False),
+                name="vk_reconciliation_scan_pair",
             ),
         ]
 

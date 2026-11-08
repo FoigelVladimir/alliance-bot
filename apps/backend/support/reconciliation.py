@@ -6,7 +6,7 @@ from accounts.policies import quarantine_incident
 from accounts.services import AccessError
 from jobs.models import BackgroundTask as Task
 from jobs.services import ClockTimestamp, LeaseLost, claim, enqueue, finish, renew
-from vk_channel.backfill import HistoryQuotaExceeded, use_history_quota
+from vk_channel.history import HistoryQuotaExceeded, read_history as guarded_history_read
 from vk_channel.client import DeliveryUnknown
 from vk_channel.services import database_now
 
@@ -264,10 +264,38 @@ def recover_expired_lookup():
     return True
 
 
+def defer_read_task(task, check, retry_at):
+    """The caller holds the domain and check locks for a still-current target."""
+    renew(task)
+    job = Task.objects.select_for_update().get(pk=task.pk)
+    now = database_now()
+    if job.attempt_count >= job.max_attempts or retry_at >= check.lookup_deadline_at or now >= check.lookup_deadline_at:
+        finish_check(check, "unresolved", "lookup_budget_exhausted")
+        job.status = Task.Status.DEAD if job.attempt_count >= job.max_attempts else Task.Status.DONE
+    else:
+        check.status = "queued"
+        check.save(update_fields=["status"])
+        job.status, job.scheduled_at = Task.Status.RETRY, retry_at
+    job.lease_token = job.locked_until = None
+    job.updated_at = now
+    job.save(update_fields=["status", "scheduled_at", "lease_token", "locked_until", "updated_at"])
+
+
+@transaction.atomic
+def defer_for_quota(task, retry_at):
+    _, response, attempt, check = lock_check(task.pk)
+    if not target_is_current(response, attempt, check):
+        finish_check(check, Check.Outcome.UNRESOLVED, "target_changed")
+        finish(task, {"reason": "target_changed"})
+        return
+    defer_read_task(task, check, retry_at or database_now() + timedelta(seconds=1))
+
+
 def run_reconciliation_once(community_id, read_history=None):
     while recover_expired_lookup():
         pass
-    task = claim([TASK_TYPE])
+    own_tasks = Check.objects.filter(response__ticket__dialog__cursor__community_id=community_id).values_list("task_id", flat=True)
+    task = claim([TASK_TYPE], task_ids=own_tasks)
     if task is None:
         return False
     try:
@@ -278,10 +306,9 @@ def run_reconciliation_once(community_id, read_history=None):
                 complete_lookup(task, None, "history_unavailable")
                 return True
             try:
-                use_history_quota(community_id)
-                items = read_history(peer_id)
-            except HistoryQuotaExceeded:
-                complete_lookup(task, None, "history_quota")
+                items = guarded_history_read(community_id, read_history, peer_id)
+            except HistoryQuotaExceeded as error:
+                defer_for_quota(task, error.retry_at)
             except (DeliveryUnknown, OSError):
                 complete_lookup(task, None, "history_unavailable")
             else:
