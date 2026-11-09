@@ -16,7 +16,8 @@ from storage.services import database_time
 from vk_channel.models import LongPollCursor
 
 from .ai_delivery import cancel_for_handoff
-from .ai_generation import ModelUnavailable, generate_quote, save_answer
+from .ai_generation import GeneratedAnswer, ModelUnavailable, generate_quote, save_answer
+from .attachment_responses import save_prompt
 from .models import (
     AIPartDelivery, AIProcessingInput, AIProcessingInputMessage, AIProcessingRun, AIRequest, AIRequestMessage,
     Dialog, InboundRoute, Message,
@@ -34,17 +35,18 @@ def begin_lookup(cursor, dialog, route, message):
     if (not settings.SUPPORT_AI_LOOKUP_ENABLED or cursor.automation_paused
             or route.automation_epoch != cursor.automation_epoch or route.mode_version != dialog.mode_version
             or dialog.mode != "ai_auto" or message.sender_vk_id != dialog.vk_peer_id
-            or message.direction != "inbound" or message.attachments.exists()):
+            or message.direction != "inbound"):
         return False
     text = " ".join(message.text.split())
-    if not text or len(text) > QUESTION_LIMIT:
+    if (not text and not message.attachments.exists()) or len(text) > QUESTION_LIMIT:
         return False
     now = database_time()
     request = None
     if route.reply_to_cmid is not None:
         request = AIRequest.objects.filter(
-            Q(status="pending") | Q(status="answered_full", aianswerinput__answer__parts__aipartdelivery__status__in=("waiting", "pending")),
+            Q(status="pending") | Q(status__in=("answered_full", "answered_partial"), aianswerinput__answer__parts__aipartdelivery__status__in=("waiting", "pending")),
             dialog=dialog, mode_version=dialog.mode_version, automation_epoch=cursor.automation_epoch, message_links__message__conversation_message_id=route.reply_to_cmid,
+            resolved_at__isnull=True,
             message_links__message__sender_vk_id=message.sender_vk_id,
             message_links__message__inboundroute__sequence__lt=route.sequence,
         ).first()
@@ -66,7 +68,7 @@ def begin_lookup(cursor, dialog, route, message):
         request.request_version += 1
         request.status, request.finished_at = "pending", None
         request.request_version_started_at = now
-        request.normalized_query += "\n" + text
+        request.normalized_query = "\n".join(part for part in (request.normalized_query, text) if part)
         request.save(update_fields=["request_version", "request_version_started_at", "normalized_query", "status", "finished_at"])
     AIRequestMessage.objects.create(request=request, message=message)
 
@@ -111,7 +113,9 @@ def lock_run(run_id, hits=()):
 
 def return_for_review(run, status, now):
     snapshot = run.inputs.get()
-    updated = AIRequest.objects.filter(pk=snapshot.request_id, request_version=snapshot.request_version).update(
+    updated = AIRequest.objects.filter(pk=snapshot.request_id, request_version=snapshot.request_version).exclude(
+        status="escalated_to_human",
+    ).update(
         status=status, finished_at=now,
     )
     if updated:
@@ -162,7 +166,9 @@ def run_lookup_once(search=hybrid_search, generate=generate_quote):
     if task is None:
         return False
     run = AIProcessingRun.objects.get(task=task)
-    question = run.inputs.get().question_text
+    snapshot = run.inputs.get()
+    question = snapshot.question_text
+    has_attachments = snapshot.messages.filter(attachments__isnull=False).exists()
     try:
         with transaction.atomic():
             cursor, dialog, locked, _ = lock_run(run.pk)
@@ -170,7 +176,8 @@ def run_lookup_once(search=hybrid_search, generate=generate_quote):
             reason = lookup_block_reason(cursor, dialog, locked, database_time())
         hits, quote = [], None
         lookup_ms = None
-        if not reason:
+        prompt = has_attachments and not question.strip()
+        if not reason and not prompt:
             started = monotonic()
             try:
                 hits = search(question)
@@ -189,30 +196,44 @@ def run_lookup_once(search=hybrid_search, generate=generate_quote):
                         reason = "processing_budget_exhausted"
                     else:
                         try:
-                            quote = generate(question, hits, remaining)
+                            if has_attachments:
+                                quote = generate(question, hits, remaining, has_unread_attachments=True)
+                            else:
+                                quote = generate(question, hits, remaining)
                         except ModelUnavailable:
                             reason = "model_unavailable"
                         else:
                             if quote is None:
                                 reason = "no_reliable_basis"
+        if has_attachments and reason == "no_reliable_basis":
+            # Missing attachment contents are not grounds for an automatic human ticket.
+            prompt, reason = True, ""
         with transaction.atomic():
-            cursor, dialog, locked, sources_current = lock_run(run.pk, hits)
+            cursor, dialog, locked, sources_current = lock_run(run.pk, () if prompt else hits)
             now = database_time()
             blocked = lookup_block_reason(cursor, dialog, locked, now)
-            established_handoff = (settings.SUPPORT_AI_HANDOFF_ENABLED and reason == "no_reliable_basis"
+            partial = isinstance(quote, GeneratedAnswer) and bool(quote.remaining_work)
+            if partial and not settings.SUPPORT_AI_HANDOFF_ENABLED:
+                reason, quote = "handoff_not_enabled", None
+            established_handoff = (settings.SUPPORT_AI_HANDOFF_ENABLED and (reason == "no_reliable_basis" or partial)
                                    and blocked == "processing_budget_exhausted")
             if blocked and not established_handoff:
                 reason, hits, quote = blocked, [], None
+                prompt = False
             elif not sources_current:
                 reason, hits, quote = "sources_changed", [], None
-            if quote is None:
+            if prompt:
+                answer = save_prompt(locked, now, lookup_ms)
+                finish(task, {"answer_id": answer.pk})
+                # The question remains pending until text clarification or an explicit handoff.
+            elif quote is None:
                 finish(task, {"reason": reason})
                 finish_lookup(locked, reason, now, hits)
             else:
                 answer = save_answer(locked, quote, hits, now, lookup_ms)
                 finish(task, {"answer_id": answer.pk})
                 # Preview remains available to staff while the delivery worker is separate.
-                return_for_review(locked, "answered_full", now)
+                return_for_review(locked, "answered_partial" if partial else "answered_full", now)
     except LeaseLost:
         pass
     return True
@@ -223,6 +244,8 @@ def lookup_block_reason(cursor, dialog, run, now):
         raise LeaseLost(run.pk)
     if quarantine_incident():
         return "recovered_from_backup"
+    if run.inputs.filter(request__resolved_at__isnull=False).exists():
+        return "student_resolved"
     if (cursor.automation_paused or cursor.automation_epoch != run.automation_epoch
             or dialog.mode != "ai_auto" or dialog.mode_version != run.mode_version):
         return "superseded"
@@ -235,10 +258,11 @@ def handoff_active_requests(cursor, dialog, ticket, *, reason="student_requested
     """Link active questions to the card while the caller still holds the mode locks."""
     now = database_time()
     active = AIRequest.objects.filter(
-        Q(pk__in=planned_request_ids) | Q(status__in=("pending", "failed")) | Q(status="answered_full", aianswerinput__answer__parts__aipartdelivery__status__in=(
+        Q(pk__in=planned_request_ids) | Q(status__in=("pending", "failed", "answered_partial")) | Q(status="answered_full", aianswerinput__answer__parts__aipartdelivery__status__in=(
             "waiting", "pending", "unknown_outcome", "failed", "cancelled",
         )),
         dialog=dialog, mode_version=dialog.mode_version, automation_epoch=cursor.automation_epoch,
+        resolved_at__isnull=True,
     )
     request_ids = list(active.values_list("pk", flat=True).distinct())
     if not request_ids:

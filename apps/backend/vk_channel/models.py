@@ -81,14 +81,31 @@ class InboundEvent(models.Model):
 
 class StudentAction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    ticket = models.ForeignKey("support.Ticket", on_delete=models.PROTECT)
+    ticket = models.ForeignKey("support.Ticket", null=True, on_delete=models.PROTECT)
+    request = models.ForeignKey("support.AIRequest", null=True, on_delete=models.PROTECT)
+    request_version = models.PositiveIntegerField(null=True)
     expected_user_id = models.BigIntegerField()
     action = models.CharField(max_length=24)
     mode_version = models.PositiveIntegerField()
     expected_closed_at = models.DateTimeField(null=True)
+    awaiting_close = models.BooleanField(default=False)
     expires_at = models.DateTimeField()
     used_at = models.DateTimeField(null=True)
     result = models.JSONField(default=dict)
+
+    class Meta:
+        constraints = [models.CheckConstraint(
+            condition=Q(ticket__isnull=False, request__isnull=True, request_version__isnull=True,
+                        action__in=("resolve", "call_manager", "continue"))
+            | Q(ticket__isnull=True, request__isnull=False, request_version__isnull=False, request_version__gte=1,
+                action__in=("resolve", "call_manager")),
+            name="vk_student_action_target",
+        ), models.CheckConstraint(
+            condition=Q(awaiting_close=False)
+            | Q(awaiting_close=True, ticket__isnull=False, request__isnull=True,
+                action="continue", expected_closed_at__isnull=True, used_at__isnull=True),
+            name="vk_continuation_waits_for_close",
+        )]
 
 
 class StudentClick(models.Model):

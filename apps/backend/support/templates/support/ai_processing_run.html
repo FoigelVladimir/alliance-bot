@@ -13,9 +13,24 @@
     <section class="mt-6 border border-neutral-300 p-4">
       <h2 class="text-xl font-semibold">Вопрос · версия {{ input.request_version }}</h2>
       <p class="mt-3 whitespace-pre-wrap break-words">{{ input.question_text }}</p>
+      {% if input.request.resolved_at and input.request_version == input.request.request_version %}
+        <p class="mt-3 text-sm">Студент подтвердил решение {{ input.request.resolved_at|date:"d.m.Y, H:i" }} · ВК {{ input.request.resolved_by_vk_id }}</p>
+      {% endif %}
     </section>
   {% endfor %}
   {% if run.answer_id %}
+    {% if run.handoff_plan_id %}
+      <section class="mt-6 border border-neutral-300 p-4">
+        <h2 class="text-xl font-semibold">Оставшиеся вопросы менеджеру</h2>
+        {% for input in run.handoff_plan.inputs_snapshot %}
+          {% if input.remaining_work %}<p class="mt-3 whitespace-pre-wrap break-words">{{ input.remaining_work }}</p>{% endif %}
+        {% endfor %}
+        <p class="mt-3 text-sm">{% if run.handoff_plan.status == "transferred" %}Переданы в обращение №{{ run.handoff_plan.ticket_id }}.
+          {% elif run.handoff_plan.status == "superseded" %}Вопрос изменился; прежняя причина передачи больше не применяется.
+          {% else %}Передача ожидает завершения отправки или общего срока.{% endif %}</p>
+        <p class="mt-2 text-sm">Подготовка ответа не подтверждает его отправку или решение вопроса.</p>
+      </section>
+    {% endif %}
     <section class="mt-6 border border-neutral-300 p-4">
       <h2 class="text-xl font-semibold">Сохранённый ответ</h2>
       {% for item in part_states %}
@@ -54,6 +69,23 @@
       {% endfor %}
     </section>
   {% endif %}
+  {% if run.answer_id %}
+    <section class="mt-6 border border-neutral-300 p-4">
+      <h2 class="text-xl font-semibold">Использованные источники</h2>
+      {% for input in run.answer.inputs.all %}
+        {% for source in input.sources_snapshot %}
+          <details class="mt-3">
+            <summary class="min-h-12 cursor-pointer">Материал №{{ source.material_id }} · версия №{{ source.publication_version }} · фрагмент №{{ source.fragment_id }}</summary>
+            <p class="mt-2 whitespace-pre-wrap break-words">{{ source.fragment_text }}</p>
+          </details>
+        {% empty %}<p class="mt-3 text-sm">Для этого вопроса источники не использовались.</p>{% endfor %}
+      {% endfor %}
+    </section>
+    {% include "support/ai_answer_review.html" %}
+  {% endif %}
 </main>
 {% endblock %}
-{% block scripts %}<script type="module" src="{% static 'support/workspace.js' %}"></script>{% endblock %}
+{% block scripts %}
+<script type="module" src="{% static 'support/workspace.js' %}"></script>
+{% if run.answer_id %}<script type="module" src="{% static 'support/ai-review.js' %}"></script>{% endif %}
+{% endblock %}

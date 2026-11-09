@@ -148,7 +148,12 @@ def admit(task, community_id):
         button = issue_ticket_action(
             ticket.pk, dialog.vk_peer_id, "resolve", attempt.started_at + timedelta(days=7),
         )
-        response.vk_keyboard = {"inline": True, "buttons": [[{"action": button, "color": "secondary"}]]}
+        continuation = issue_ticket_action(
+            ticket.pk, dialog.vk_peer_id, "continue", attempt.started_at + timedelta(days=7), await_close=True,
+        )
+        response.vk_keyboard = {"inline": True, "buttons": [
+            [{"action": button, "color": "secondary"}], [{"action": continuation, "color": "secondary"}],
+        ]}
         response.save(update_fields=["vk_keyboard"])
     parameters = (dialog.vk_peer_id, response.vk_random_id, response.text)
     return (*parameters, response.vk_keyboard) if response.vk_keyboard else parameters

@@ -1,0 +1,45 @@
+{% load l10n %}
+<section class="mt-6 border border-neutral-300 p-4" aria-labelledby="review-heading">
+  <h2 id="review-heading" class="text-xl font-semibold">Оценка ответа</h2>
+  <p class="mt-3 text-sm">Общая оценка для сотрудников с доступом к ответу.</p>
+  {% if quality_review %}
+    <p class="mt-3 text-sm">{% if quality_review.problem_flag %}Есть проблема · поставил сотрудник {{ quality_review.flagged_by_id }} {{ quality_review.flagged_at|date:"d.m.Y, H:i" }}{% else %}Пометка снята{% endif %}.</p>
+    <p class="mt-2 text-sm">Последнее сохранение: сотрудник {{ quality_review.updated_by_id }}, {{ quality_review.updated_at|date:"d.m.Y, H:i" }} · ревизия {{ quality_review.revision|unlocalize }}.</p>
+  {% else %}<p class="mt-3 text-sm">Оценка ещё не сохранена.</p>{% endif %}
+  <form class="mt-4" action="{% url 'support-ai-answer-review' run.answer_id %}" method="post" data-ai-review data-revision="{% if quality_review %}{{ quality_review.revision|unlocalize }}{% else %}0{% endif %}">
+    {% csrf_token %}
+    {{ quality_review.comment|default:""|json_script:"ai-review-initial-comment" }}
+    <label class="flex min-h-12 items-center gap-3"><input type="checkbox" name="problem_flag"{% if quality_review.problem_flag %} checked{% endif %}>Есть проблема</label>
+    <label class="mt-3 block" for="review-comment">Комментарий (до 2000 символов)</label>
+    <textarea id="review-comment" class="mt-2 block min-h-32 w-full border border-neutral-400 p-3" name="comment" rows="4">{{ quality_review.comment|default_if_none:"" }}</textarea>
+    <div class="mt-3 flex flex-wrap gap-4">
+      <button class="min-h-12 border border-neutral-700 px-3 py-2 font-semibold" type="submit" data-review-save>Сохранить оценку</button>
+      <button class="min-h-12 underline" type="button" data-review-refresh>Сравнить с актуальной оценкой</button>
+    </div>
+    <p class="mt-3 text-sm" role="status" aria-live="polite" data-review-status></p>
+    <div class="mt-4 border border-neutral-300 p-3" data-review-comparison hidden>
+      <p class="text-sm" data-review-server-status></p>
+      <label class="mt-3 block" for="review-server-comment">Актуальный комментарий</label>
+      <textarea id="review-server-comment" class="mt-2 block w-full border border-neutral-400 p-3" rows="4" readonly></textarea>
+      <button class="mt-3 min-h-12 underline" type="button" data-review-accept hidden>Использовать актуальную ревизию для моих правок</button>
+    </div>
+    <noscript><p class="mt-3">Для сохранения оценки включите JavaScript.</p></noscript>
+  </form>
+  <h3 class="mt-6 text-lg font-semibold">История оценок</h3>
+  <p class="mt-2"><a class="underline" href="{% url 'support-ai-answer' run.answer_id %}#review-heading">Обновить оценку и историю</a></p>
+  <ol class="mt-3 space-y-3">
+    {% for event in review_history %}
+      <li class="border border-neutral-300 p-3">
+        <p class="text-sm">Ревизия {{ event.resulting_revision|unlocalize }} · сотрудник {{ event.actor_id }} · {{ event.created_at|date:"d.m.Y, H:i" }} · {% if event.after_state.review.problem_flag %}Есть проблема{% else %}Пометка снята{% endif %}</p>
+        <p class="mt-2 whitespace-pre-wrap break-words">{{ event.after_state.review.comment }}</p>
+      </li>
+    {% empty %}<li>Сохранений пока нет.</li>{% endfor %}
+  </ol>
+  {% if review_history.has_other_pages %}
+    <nav class="mt-4 flex gap-4" aria-label="История оценок">
+      {% if review_history.has_previous %}<a class="underline" href="?review_page={{ review_history.previous_page_number }}#review-heading">Назад</a>{% endif %}
+      <span>{{ review_history.number }} из {{ review_history.paginator.num_pages }}</span>
+      {% if review_history.has_next %}<a class="underline" href="?review_page={{ review_history.next_page_number }}#review-heading">Далее</a>{% endif %}
+    </nav>
+  {% endif %}
+</section>

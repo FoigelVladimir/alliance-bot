@@ -27,6 +27,10 @@ def route_live_message(cursor, dialog, route, message):
     phrase = plain_phrase(message.text)
     if route.mode_version != dialog.mode_version or dialog.mode != "ai_auto":
         return False
+    from .continuations import route_unresolved_text
+
+    if route_unresolved_text(cursor, dialog, route, message, phrase):
+        return True
     if (phrase in CLOSING_ACKNOWLEDGEMENTS and not message.attachments.exists()
             and Ticket.objects.filter(dialog=dialog, status=Ticket.Status.CLOSED).exists()):
         route.status, route.reason = "ignored", "closing_acknowledgement"

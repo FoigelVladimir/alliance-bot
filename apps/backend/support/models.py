@@ -1,7 +1,7 @@
 from uuid import NAMESPACE_URL, uuid5
 
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 
@@ -364,9 +364,16 @@ class AIRequest(models.Model):
     status = models.CharField(max_length=30, default="pending")
     created_at = models.DateTimeField()
     finished_at = models.DateTimeField(null=True)
+    resolved_at = models.DateTimeField(null=True)
+    resolved_by_vk_id = models.BigIntegerField(null=True)
 
     class Meta:
         db_table = "support_ai_request"
+        constraints = [models.CheckConstraint(
+            condition=Q(resolved_at__isnull=True, resolved_by_vk_id__isnull=True)
+            | Q(resolved_at__isnull=False, resolved_by_vk_id__isnull=False, resolved_by_vk_id__gt=0),
+            name="support_ai_resolution_pair",
+        )]
 
 
 class AIRequestMessage(models.Model):
@@ -445,6 +452,49 @@ class AIAnswer(models.Model):
         db_table = "support_ai_answer"
 
 
+class AIAnswerReview(models.Model):
+    answer = models.OneToOneField(AIAnswer, on_delete=models.PROTECT, related_name="quality_review")
+    problem_flag = models.BooleanField(default=False)
+    comment = models.CharField(max_length=2000, default="", blank=True)
+    revision = models.PositiveBigIntegerField(default=1)
+    flagged_by = models.ForeignKey("accounts.StaffProfile", null=True, on_delete=models.PROTECT, related_name="+")
+    flagged_at = models.DateTimeField(null=True)
+    updated_by = models.ForeignKey("accounts.StaffProfile", on_delete=models.PROTECT, related_name="+")
+    updated_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "support_ai_answer_review"
+        constraints = [
+            models.CheckConstraint(condition=Q(revision__gte=1), name="support_ai_review_revision"),
+            models.CheckConstraint(
+                condition=Q(problem_flag=True, flagged_by__isnull=False, flagged_at__isnull=False)
+                | Q(problem_flag=False, flagged_by__isnull=True, flagged_at__isnull=True),
+                name="support_ai_review_flag_author",
+            ),
+        ]
+
+
+class AIAnswerReviewEvent(models.Model):
+    review = models.ForeignKey(AIAnswerReview, on_delete=models.PROTECT, related_name="events")
+    actor = models.ForeignKey("accounts.StaffProfile", on_delete=models.PROTECT, related_name="+")
+    client_operation_id = models.UUIDField(unique=True)
+    expected_revision = models.PositiveBigIntegerField()
+    resulting_revision = models.PositiveBigIntegerField()
+    request_payload = models.JSONField()
+    before_state = models.JSONField()
+    after_state = models.JSONField()
+    created_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "support_ai_answer_review_event"
+        constraints = [
+            models.UniqueConstraint(fields=["review", "resulting_revision"], name="support_ai_review_event_unique"),
+            models.CheckConstraint(condition=Q(resulting_revision=F("expected_revision") + 1),
+                                   name="support_ai_review_event_revision"),
+        ]
+        indexes = [models.Index(fields=["review", "resulting_revision"], name="support_ai_review_history")]
+
+
 class AIAnswerInput(models.Model):
     answer = models.ForeignKey(AIAnswer, on_delete=models.PROTECT, related_name="inputs")
     request = models.ForeignKey(AIRequest, on_delete=models.PROTECT)
@@ -502,6 +552,7 @@ class AIPartDelivery(models.Model):
     status = models.CharField(max_length=20, default="waiting")
     vk_random_id = models.PositiveIntegerField(null=True, unique=True)
     provider_message_id = models.PositiveBigIntegerField(null=True)
+    vk_keyboard = models.JSONField(null=True)
     reason_code = models.CharField(max_length=48, blank=True)
     created_at = models.DateTimeField()
     updated_at = models.DateTimeField()

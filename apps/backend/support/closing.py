@@ -139,6 +139,10 @@ def close_ticket(session, ticket_id, operation_id, version, confirm, token):
     dialog.save(update_fields=["mode", "mode_version", "updated_at"])
     cancel_waiting_on_close(responses, attempts, now)
 
+    from .continuations import activate_continuations
+
+    activate_continuations(ticket, dialog, now)
+
     result = {**ticket_data(ticket), "opened_at": ticket.created_at.isoformat().replace("+00:00", "Z"),
               "closed_at": now.isoformat().replace("+00:00", "Z"), "closed_by_id": str(actor.pk),
               "closed_reason": ticket.closed_reason, "closed_warning_ack": confirm}

@@ -8,6 +8,7 @@ urlpatterns = [
     path("ai-journal/", ai_journal.journal, name="support-ai-journal"),
     path("fragments/ai-journal/", ai_journal.journal, {"fragment": True}, name="support-ai-journal-fragment"),
     path("ai-answers/<int:answer_id>/", ai_journal.answer_detail, name="support-ai-answer"),
+    path("ai-answers/<int:answer_id>/review/", ai_journal.answer_review, name="support-ai-answer-review"),
     path("ai-processing-runs/<int:run_id>/", ai_journal.processing_run, name="support-ai-processing-run"),
     path("attachments/<int:attachment_id>/prepare/", views.prepare_attachment, name="support-attachment-prepare"),
     path("attachments/<int:attachment_id>/state/", views.attachment_state, name="support-attachment-state"),

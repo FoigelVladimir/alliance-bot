@@ -4,7 +4,8 @@
   <ul class="space-y-4">
     {% for run, reason in entries %}
       <li class="border border-neutral-300 p-4">
-        <p class="text-sm text-neutral-700">{{ run.finished_at|date:"d.m.Y, H:i" }} · {{ reason }}</p>
+        <p class="text-sm text-neutral-700">{{ run.row_at|date:"d.m.Y, H:i" }} · {{ reason }}</p>
+        {% if run.answer.quality_review.problem_flag %}<p class="mt-2 font-semibold">Есть проблема</p>{% endif %}
         {% for input in run.inputs.all %}
           <p class="mt-2 break-words">{{ input.question_text|truncatechars:180 }}</p>
         {% endfor %}

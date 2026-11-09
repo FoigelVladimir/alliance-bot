@@ -17,6 +17,7 @@
         <option value="all"{% if filters.result == "all" %} selected{% endif %}>Все</option>
         <option value="no_answer"{% if filters.result == "no_answer" %} selected{% endif %}>Без ответа</option>
         <option value="answer"{% if filters.result == "answer" %} selected{% endif %}>Ответ подготовлен</option>
+        <option value="problem"{% if filters.result == "problem" %} selected{% endif %}>Есть проблема</option>
       </select>
     </label>
     {% if filters.delivery != "all" %}<input type="hidden" name="delivery" value="{{ filters.delivery }}">{% endif %}

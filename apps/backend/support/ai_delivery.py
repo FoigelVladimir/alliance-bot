@@ -1,5 +1,6 @@
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
+from django.conf import settings
 from django.db import connection, transaction
 
 from accounts.policies import quarantine_incident
@@ -12,6 +13,7 @@ from vk_channel.models import LongPollCursor
 
 from .models import AIAnswer, AIAnswerInput, AIPartAttempt, AIPartDelivery, AIPartReconciliation, BotDeliveryRecoveryRun, Dialog, Message
 from .vk_keys import reserve_random_id
+from .attachment_responses import PROFILE as ATTACHMENT_PROMPT_PROFILE, valid_prompt
 
 TASK_TYPE = "send_vk_bot_part"
 
@@ -29,8 +31,12 @@ def lock_chain(answer_id, *, verify_sources=False):
     cursor = LongPollCursor.objects.select_for_update().get(pk=head["dialog__cursor_id"])
     sources_ok = True
     if verify_sources:
-        hits = answer_hits(AIAnswer.objects.get(pk=answer_id))
-        sources_ok = bool(hits) and sources_are_current(hits)
+        snapshot = AIAnswer.objects.get(pk=answer_id)
+        if snapshot.retrieval_snapshot.get("profile") == ATTACHMENT_PROMPT_PROFILE:
+            sources_ok = valid_prompt(snapshot)
+        else:
+            hits = answer_hits(snapshot)
+            sources_ok = bool(hits) and sources_are_current(hits)
     dialog = Dialog.objects.select_for_update().get(pk=head["dialog_id"])
     answer = AIAnswer.objects.select_for_update().get(pk=answer_id)
     deliveries = list(AIPartDelivery.objects.filter(part__answer=answer).select_related("part")
@@ -53,6 +59,8 @@ def block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id):
     if any(item.request.request_version != item.request_version_snapshot
            for item in answer.inputs.select_related("request")):
         return "question_changed"
+    if answer.inputs.filter(request__resolved_at__isnull=False).exists():
+        return "question_resolved"
     if not sources_ok:
         return "sources_changed"
     return ""
@@ -166,7 +174,13 @@ def admit(task, community_id, peer_id):
     admit_external_call(task)
     attempt.started_at = database_time()
     attempt.save(update_fields=["started_at"])
-    return dialog.vk_peer_id, delivery.vk_random_id, delivery.part.text_snapshot
+    if settings.VK_CLICK_ANSWERS_VERIFIED and delivery.vk_keyboard is None:
+        from vk_channel.student_actions import bot_keyboard
+
+        delivery.vk_keyboard = bot_keyboard(answer, delivery, attempt.started_at)
+        delivery.save(update_fields=["vk_keyboard"])
+    parameters = (dialog.vk_peer_id, delivery.vk_random_id, delivery.part.text_snapshot)
+    return (*parameters, delivery.vk_keyboard) if delivery.vk_keyboard else parameters
 
 
 @transaction.atomic
@@ -237,17 +251,22 @@ def run_bot_sender_once(community_id, peer_id, send):
 
 def cancel_for_handoff(answer_id, now):
     """The caller holds the dialog lock and has already linked the handoff card."""
+    cancel_unstarted_parts(answer_id, now, "dialog_changed")
+
+
+def cancel_unstarted_parts(answer_id, now, reason):
+    """The caller holds the cursor and dialog locks; admitted calls retain their outcomes."""
     answer = AIAnswer.objects.select_for_update().get(pk=answer_id)
     deliveries = AIPartDelivery.objects.filter(part__answer=answer, status="pending").select_for_update().order_by("pk")
-    cancel_waiting(answer, "dialog_changed", now)
+    cancel_waiting(answer, reason, now)
     for delivery in deliveries:
         attempt = AIPartAttempt.objects.select_for_update().get(delivery=delivery)
         if attempt.started_at is None and attempt.status == "in_flight":
             Task.objects.filter(pk=attempt.task_id, admitted_at__isnull=True).update(
-                status=Task.Status.FAILED, result={"reason": "dialog_changed"},
+                status=Task.Status.FAILED, result={"reason": reason},
                 lease_token=None, locked_until=None, updated_at=now,
             )
-            set_outcome(answer, delivery, attempt, "cancelled", now, reason="dialog_changed")
+            set_outcome(answer, delivery, attempt, "cancelled", now, reason=reason)
 
 
 def isolate_restored_bot_deliveries(recovery_run_id=None):

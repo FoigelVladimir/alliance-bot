@@ -40,7 +40,7 @@ def current_inputs(plan, cursor, dialog):
     if (cursor.automation_paused or cursor.automation_epoch != plan.automation_epoch
             or dialog.mode != "ai_auto" or dialog.mode_version != plan.mode_version):
         return []
-    versions = dict(AIRequest.objects.filter(dialog=dialog).values_list("pk", "request_version"))
+    versions = dict(AIRequest.objects.filter(dialog=dialog, resolved_at__isnull=True).values_list("pk", "request_version"))
     return [item for item in plan.inputs_snapshot if versions.get(item["request_id"]) == item["version"]]
 
 
@@ -155,19 +155,20 @@ def unclassified_routes(cursor, dialog):
     )
 
 
-def work_for_ticket(cursor, dialog, plans):
+def work_for_ticket(cursor, dialog, plans, *, planned_request_ids=()):
     residue = {
         item["request_id"]: item["remaining_work"]
         for plan in plans for item in current_inputs(plan, cursor, dialog) if item["remaining_work"]
     }
     work = []
     requests = AIRequest.objects.filter(dialog=dialog, mode_version=dialog.mode_version,
-                                        automation_epoch=cursor.automation_epoch).order_by("pk")
+                                        automation_epoch=cursor.automation_epoch, resolved_at__isnull=True).order_by("pk")
     for request in requests:
-        if request.pk in residue or request.status in {"pending", "failed"}:
+        if request.pk in residue or request.pk in planned_request_ids or request.status in {"pending", "failed"}:
             work.append({"kind": "question", "request_id": request.pk, "version": request.request_version,
                          "question": request.normalized_query,
-                         "remaining_work": residue.get(request.pk, "Вопрос ожидает ответа сотрудника"),
+                         "remaining_work": residue.get(request.pk, "Студент попросил помощи сотрудника"
+                                                       if request.pk in planned_request_ids else "Вопрос ожидает ответа сотрудника"),
                          "message_ids": list(request.message_links.values_list("message_id", flat=True))})
     for route in unclassified_routes(cursor, dialog).select_related("message").order_by("sequence"):
         work.append({"kind": "question", "question": route.message.text,
@@ -176,20 +177,21 @@ def work_for_ticket(cursor, dialog, plans):
         part__answer__aiprocessingrun__dialog=dialog,
         part__answer__aiprocessingrun__mode_version=dialog.mode_version,
         part__answer__aiprocessingrun__automation_epoch=cursor.automation_epoch,
-    ).exclude(status="sent").select_related("part").order_by("part__answer_id", "part__position")
+        part__aianswerpartinput__isnull=False,
+    ).exclude(status="sent").select_related("part").distinct().order_by("part__answer_id", "part__position")
     for delivery in deliveries:
-        if any(item.request.request_version == item.request_version_snapshot
+        if any(item.request.resolved_at is None and item.request.request_version == item.request_version_snapshot
                for item in delivery.part.answer.inputs.select_related("request")):
             work.append({"kind": "unconfirmed_part", "part_id": delivery.part_id,
                          "text": delivery.part.text_snapshot, "status": delivery.status})
     return work
 
 
-def transfer_locked(cursor, dialog, plans, now, *, ticket=None):
+def transfer_locked(cursor, dialog, plans, now, *, ticket=None, planned_request_ids=()):
     from .ai_delivery import cancel_for_handoff
     from .ai_processing import handoff_active_requests
 
-    work = work_for_ticket(cursor, dialog, plans)
+    work = work_for_ticket(cursor, dialog, plans, planned_request_ids=planned_request_ids)
     ticket = ticket or Ticket.objects.select_for_update().filter(dialog=dialog, status=Ticket.Status.OPEN).first()
     if ticket is None:
         ticket = Ticket.objects.create(dialog=dialog, handoff_reason="no_reliable_basis", created_at=now)
@@ -197,7 +199,7 @@ def transfer_locked(cursor, dialog, plans, now, *, ticket=None):
         plan.status, plan.ticket, plan.finished_at, plan.work_snapshot = "transferred", ticket, now, work
         plan.save(update_fields=["status", "ticket", "finished_at", "work_snapshot"])
     # Persist the card before cancelling attempts, whose outcome handlers revisit the plan.
-    request_ids = {item["request_id"] for plan in plans for item in current_inputs(plan, cursor, dialog)}
+    request_ids = set(planned_request_ids) | {item["request_id"] for plan in plans for item in current_inputs(plan, cursor, dialog)}
     handoff_active_requests(cursor, dialog, ticket, reason=ticket.handoff_reason or "no_reliable_basis",
                             planned_request_ids=request_ids)
     route_ids = list(unclassified_routes(cursor, dialog).values_list("pk", flat=True))
@@ -251,12 +253,12 @@ def refresh_dialog_plans(cursor, dialog):
             break
 
 
-def finish_explicit_handoff(cursor, dialog, ticket):
+def finish_explicit_handoff(cursor, dialog, ticket, *, planned_request_ids=(), force=False):
     plans = [plan for plan in HandoffPlan.objects.filter(dialog=dialog, status="pending").order_by("pk")
              if refresh_plan(plan, cursor, dialog, database_time())]
-    if plans:
-        transfer_locked(cursor, dialog, plans, database_time(), ticket=ticket)
-    return bool(plans)
+    if plans or planned_request_ids or force:
+        transfer_locked(cursor, dialog, plans, database_time(), ticket=ticket, planned_request_ids=planned_request_ids)
+    return bool(plans or planned_request_ids or force)
 
 
 def answer_outcome_changed(answer_id):
