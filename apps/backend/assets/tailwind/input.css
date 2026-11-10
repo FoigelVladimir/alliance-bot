@@ -4,6 +4,9 @@
 @source "../../support/templates";
 @source "../../workspace/static";
 @source "../../knowledge/templates";
+@source "../../participants/templates";
+@source "../../events/templates";
+@source "../../notifications/templates";
 @source "../../static/js";
 
 @theme {

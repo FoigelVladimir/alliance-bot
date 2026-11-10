@@ -233,7 +233,10 @@ def save_answer(run, quote, hits, now, lookup_ms):
             AIAnswerPartInput.objects.create(part=part, input=answer_input)
         AIPartDelivery.objects.create(part=part, created_at=now, updated_at=now)
     run.status, run.reason, run.answer, run.finished_at = "answer_saved", "", answer, now
-    run.save(update_fields=["status", "reason", "answer", "finished_at"])
+    from .ai_join import completion_deadline
+
+    run.join_until = completion_deadline(now)
+    run.save(update_fields=["status", "reason", "answer", "finished_at", "join_until"])
     from .handoff_plans import bind_answer, answer_outcome_changed, ensure_handoff
 
     if remainder:

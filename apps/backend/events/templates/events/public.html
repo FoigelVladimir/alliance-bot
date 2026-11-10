@@ -1,0 +1,17 @@
+{% extends "base.html" %}{% load tz %}
+{% block title %}{{ event.title }} · Альянс{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-3xl px-4 py-8">
+  <h1 class="text-3xl font-semibold">{{ event.title }}</h1>
+  <p class="mt-3">{{ event.sport }} · {% if event.participation_format == 'team' %}Командное участие{% else %}Индивидуальное участие{% endif %}</p>
+  {% timezone event.timezone_name %}<p class="mt-3">{{ event.planned_start_at|date:"d.m.Y H:i" }} · {{ event.timezone_name }}</p>{% endtimezone %}
+  <p class="mt-3">{{ event.location }}</p><p class="mt-4 whitespace-pre-wrap break-words">{{ event.description }}</p>
+  <p class="mt-4">{{ event_data.state_label }}</p>
+  {% if event_data.registration_open %}
+    {% timezone event.timezone_name %}<p class="mt-3">Заявки принимаются до {{ event_data.registration_deadline_at|date:"d.m.Y H:i" }} · {{ event.timezone_name }}.</p>{% endtimezone %}
+    <p class="mt-4">Для заполнения своей заявки откройте бота клуба и отправьте: «Запись на мероприятие {{ event.pk }}».</p>
+    {% if bot_url %}<a class="mt-4 inline-flex min-h-12 items-center rounded-lg bg-neutral-950 px-4 py-3 font-semibold text-white" href="{{ bot_url }}" rel="noreferrer">Открыть бота</a>{% endif %}
+    <p class="mt-3">Подача заявки не означает допуск. Её рассмотрит организатор.</p>
+  {% else %}<p class="mt-4">Приём новых заявок закрыт. Свои сохранённые заявки можно открыть командой «Мои заявки» в боте.</p>{% endif %}
+</main>
+{% endblock %}

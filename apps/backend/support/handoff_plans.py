@@ -155,7 +155,7 @@ def unclassified_routes(cursor, dialog):
     )
 
 
-def work_for_ticket(cursor, dialog, plans, *, planned_request_ids=()):
+def work_for_ticket(cursor, dialog, plans, *, planned_request_ids=(), reason="student_requested_manager"):
     residue = {
         item["request_id"]: item["remaining_work"]
         for plan in plans for item in current_inputs(plan, cursor, dialog) if item["remaining_work"]
@@ -164,10 +164,11 @@ def work_for_ticket(cursor, dialog, plans, *, planned_request_ids=()):
     requests = AIRequest.objects.filter(dialog=dialog, mode_version=dialog.mode_version,
                                         automation_epoch=cursor.automation_epoch, resolved_at__isnull=True).order_by("pk")
     for request in requests:
-        if request.pk in residue or request.pk in planned_request_ids or request.status in {"pending", "failed"}:
+        if request.pk in residue or request.pk in planned_request_ids or request.status in {"pending", "failed", "awaiting_clarification"}:
             work.append({"kind": "question", "request_id": request.pk, "version": request.request_version,
                          "question": request.normalized_query,
-                         "remaining_work": residue.get(request.pk, "Студент попросил помощи сотрудника"
+                         "remaining_work": residue.get(request.pk, ("Сотрудник подключился к автоматической помощи"
+                                                       if reason == "manager_joined" else "Студент попросил помощи сотрудника")
                                                        if request.pk in planned_request_ids else "Вопрос ожидает ответа сотрудника"),
                          "message_ids": list(request.message_links.values_list("message_id", flat=True))})
     for route in unclassified_routes(cursor, dialog).select_related("message").order_by("sequence"):
@@ -191,7 +192,8 @@ def transfer_locked(cursor, dialog, plans, now, *, ticket=None, planned_request_
     from .ai_delivery import cancel_for_handoff
     from .ai_processing import handoff_active_requests
 
-    work = work_for_ticket(cursor, dialog, plans, planned_request_ids=planned_request_ids)
+    work = work_for_ticket(cursor, dialog, plans, planned_request_ids=planned_request_ids,
+                           reason=ticket.handoff_reason if ticket else "no_reliable_basis")
     ticket = ticket or Ticket.objects.select_for_update().filter(dialog=dialog, status=Ticket.Status.OPEN).first()
     if ticket is None:
         ticket = Ticket.objects.create(dialog=dialog, handoff_reason="no_reliable_basis", created_at=now)

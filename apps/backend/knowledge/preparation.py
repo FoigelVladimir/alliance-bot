@@ -25,6 +25,9 @@ def request_preparation(session, material_id, version_id, operation_id, revision
     if version is None:
         raise AccessError("draft_not_found", 404)
     require_draft_access(actor, version)
+    if version.source_type != "text":
+        from .sources import raw_access
+        raw_access(actor, version)
     if type(revision) is not int or not 0 < revision < 2**63:
         raise AccessError("invalid_request", 400)
     command, created = reserve_command(actor, operation_id, "prepare", material_id, version_id, {}, revision)
@@ -34,6 +37,8 @@ def request_preparation(session, material_id, version_id, operation_id, revision
         raise AccessError("draft_sealed", 409)
     if version.draft_revision != revision:
         raise AccessError("draft_revision_conflict", 409, current_draft_revision=version.draft_revision)
+    if version.current_source_read_id and version.current_source_read.task.status in ACTIVE:
+        raise AccessError("preparation_in_progress", 409)
     previous = version.current_preparation
     previous_state = preparation_data(previous)
     if previous_state["status"] == "preparing" or previous_state.get("index_status") == "indexing":
@@ -44,6 +49,7 @@ def request_preparation(session, material_id, version_id, operation_id, revision
     })
     preparation = MaterialPreparation.objects.create(
         pk=preparation_id, command=command, version=version, draft_revision=revision, task=task,
+        access_generation=actor.access_generation,
     )
     version.current_preparation = preparation
     version.save(update_fields=["current_preparation"])
@@ -60,15 +66,36 @@ def prepare_text_task(task):
     ).first()
     if version is None:
         raise LeaseLost(task.pk)
+    source_reason = ""
     text = version.source_text
+    if version.source_type != "text":
+        from .sources import authorized, prepare_source_text
+        from .table_sources import SourceError
+        record = version.current_preparation
+        if not authorized(record, record.command.actor):
+            source_reason = "source_access_changed"
+        else:
+            try:
+                text = prepare_source_text(version)
+            except SourceError as error:
+                source_reason = error.code
+            except OSError:
+                source_reason = "source_file_unavailable"
     source_bytes = text.encode("utf-8")
-    reason = ""
-    if not text.strip():
+    reason = source_reason
+    if not reason and not text.strip():
         reason = "empty_source"
     elif len(source_bytes) > TEXT_BYTES_LIMIT:
         reason = "text_too_large"
 
     def save_snapshot():
+        if version.source_type != "text":
+            from accounts.services import lock_profiles
+            from .sources import authorized
+            record = version.current_preparation
+            actor = lock_profiles(record.command.actor_id).get(record.command.actor_id)
+            if not authorized(record, actor):
+                return {"reason": "source_access_changed"}
         locked_material(version.material_id)
         current = MaterialVersion.objects.select_for_update().get(pk=version.pk)
         if (current.draft_revision != version.draft_revision or
@@ -79,6 +106,8 @@ def prepare_text_task(task):
         snapshot = SourceSnapshot.objects.create(
             preparation_id=current.current_preparation_id, prepared_text=text,
             source_sha256=sha256(source_bytes).hexdigest(), created_at=database_time(),
+            original_file=current.source_file, table_snapshot=current.current_table_snapshot,
+            selection_snapshot=current.table_selection,
         )
         enqueue_index(snapshot)
         # The worker checks the task lease before committing the snapshot and indexing task.

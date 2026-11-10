@@ -48,7 +48,10 @@ def save_prompt(run, now, lookup_ms=None):
     # This is a request for clarification, not a substantive answer to the question.
     AIPartDelivery.objects.create(part=part, created_at=now, updated_at=now)
     run.status, run.reason, run.answer, run.finished_at = "answer_saved", "", answer, now
-    run.save(update_fields=["status", "reason", "answer", "finished_at"])
+    from .ai_join import completion_deadline
+
+    run.join_until = completion_deadline(now)
+    run.save(update_fields=["status", "reason", "answer", "finished_at", "join_until"])
     return answer
 
 

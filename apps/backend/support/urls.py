@@ -10,6 +10,7 @@ urlpatterns = [
     path("ai-answers/<int:answer_id>/", ai_journal.answer_detail, name="support-ai-answer"),
     path("ai-answers/<int:answer_id>/review/", ai_journal.answer_review, name="support-ai-answer-review"),
     path("ai-processing-runs/<int:run_id>/", ai_journal.processing_run, name="support-ai-processing-run"),
+    path("ai-processing-runs/<int:run_id>/join/", ai_journal.join_dialog, name="support-ai-join"),
     path("attachments/<int:attachment_id>/prepare/", views.prepare_attachment, name="support-attachment-prepare"),
     path("attachments/<int:attachment_id>/state/", views.attachment_state, name="support-attachment-state"),
     path("attachments/<int:attachment_id>/content/", views.attachment_content, name="support-attachment-content"),

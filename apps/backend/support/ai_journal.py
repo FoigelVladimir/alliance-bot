@@ -5,7 +5,7 @@ from uuid import uuid4
 from django.core.paginator import Paginator
 from django.db.models import Case, DateTimeField, F, PositiveBigIntegerField, When
 from django.http import JsonResponse, QueryDict
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_http_methods, require_safe
@@ -14,8 +14,9 @@ from accounts.services import AccessError
 from accounts.views import json_object, private
 
 from .models import AIAnswerReview, AIAnswerReviewEvent, AIProcessingRun, Ticket
-from .queries import allowed_communities
+from .queries import allowed_communities, ticket_data
 from .services import support_actor
+from . import ai_join
 
 REASONS = {
     "superseded": "Вопрос или режим диалога изменился",
@@ -43,16 +44,22 @@ def day(value):
     return parsed
 
 
-def visible_runs(actor):
-    return AIProcessingRun.objects.select_related("answer", "answer__quality_review").filter(
-        status__in=("no_answer", "answer_saved"), dialog__cursor_id__in=allowed_communities(actor),
+def visible_runs(actor, *, include_running=False):
+    return AIProcessingRun.objects.select_related("answer", "answer__quality_review", "dialog__cursor").filter(
+        status__in=("no_answer", "answer_saved", "running") if include_running else ("no_answer", "answer_saved"),
+        dialog__cursor_id__in=allowed_communities(actor),
     )
 
 
 def run_label(run):
+    if run.status == "running":
+        return "Обрабатывается вопрос"
     if run.status == "answer_saved":
         from .attachment_responses import PROFILE
+        from .context_responses import PROFILE as CONTEXT_PROFILE
 
+        if run.answer.retrieval_snapshot.get("profile") == CONTEXT_PROFILE:
+            return "Подготовлена просьба уточнить вопрос"
         if run.answer.retrieval_snapshot.get("profile") == PROFILE:
             return "Подготовлена просьба описать вложение текстом"
         if run.handoff_plan_id:
@@ -116,13 +123,16 @@ def processing_run(request, run_id):
     actor = support_actor(request.session)
     if not 0 < run_id < 2**63:
         raise AccessError("not_found", 404)
-    run = visible_runs(actor).prefetch_related("inputs").filter(pk=run_id, status="no_answer").first()
+    run = visible_runs(actor, include_running=True).prefetch_related("inputs__request", "inputs__messages").filter(pk=run_id).first()
     if run is None:
         raise AccessError("not_found", 404)
+    if run.answer_id:
+        return redirect("support-ai-answer", answer_id=run.answer_id)
     ticket = Ticket.objects.filter(
         pk=run.handoff_ticket_id, dialog__cursor_id__in=allowed_communities(actor),
     ).first() if run.handoff_ticket_id else None
-    return render(request, "support/ai_processing_run.html", {"run": run, "reason": run_label(run), "ticket": ticket})
+    return render(request, "support/ai_processing_run.html", {"run": run, "reason": run_label(run), "ticket": ticket,
+        "join": ai_join.state(run), "join_operation_id": uuid4()})
 
 
 @private
@@ -135,7 +145,7 @@ def answer_detail(request, answer_id):
         raise AccessError("not_found", 404)
     run = visible_runs(actor).filter(answer_id=answer_id, status="answer_saved").select_related(
         "answer",
-    ).prefetch_related("inputs", "answer__inputs", "answer__parts__aipartdelivery").first()
+    ).prefetch_related("inputs__request", "inputs__messages", "answer__inputs", "answer__parts__aipartdelivery").first()
     if run is None:
         raise AccessError("not_found", 404)
     parts = [{"part": part, "state": delivery_state(actor, part.aipartdelivery), "operation_id": uuid4()}
@@ -146,7 +156,8 @@ def answer_detail(request, answer_id):
     ), 50).get_page(request.GET.get("review_page", "1"))
     return render(request, "support/ai_processing_run.html", {"run": run, "reason": run_label(run),
         "part_states": parts, "return_url": reverse("support-ai-answer", args=[answer_id]),
-        "quality_review": review, "review_history": history})
+        "quality_review": review, "review_history": history,
+        "join": ai_join.state(run), "join_operation_id": uuid4()})
 
 
 @private
@@ -161,3 +172,20 @@ def answer_review(request, answer_id):
         raise AccessError("invalid_request", 400)
     data = json_object(request, ("client_operation_id", "expected_review_revision", "problem_flag", "comment"))
     return JsonResponse(save_review(request.session, answer_id, data["client_operation_id"], parameters(data)))
+
+
+@private
+@require_http_methods(["POST"])
+def join_dialog(request, run_id):
+    from .views import command_data, operation
+
+    data = command_data(request, ["expected_mode_version"])
+    version = data["expected_mode_version"]
+    if type(version) is not int or not 0 < version < 2**31:
+        raise AccessError("invalid_request", 400)
+    ticket, mode_version, replayed = ai_join.join(
+        request.session, run_id, data["client_operation_id"], version,
+    )
+    return JsonResponse({"operation": operation(data, "join_ai_dialog", replayed),
+                         "ticket": ticket_data(ticket),
+                         "mode_version": mode_version}, status=200 if replayed else 201)

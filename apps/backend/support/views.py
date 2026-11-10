@@ -69,6 +69,8 @@ def queue(request):
 @private
 @require_safe
 def review_detail(request, route_id):
+    from .ai_join import latest_state
+
     actor = support_actor(request.session)
     check_path_id(route_id)
     route = InboundRoute.objects.filter(
@@ -79,6 +81,7 @@ def review_detail(request, route_id):
     return render_support(request, "ticket", {
         "route": route, "current_ticket": open_ticket(route.dialog_id),
         "route_operation_id": uuid4(), "dismiss_operation_id": uuid4(),
+        "join": latest_state(actor, route.dialog_id), "join_operation_id": uuid4(),
     })
 
 

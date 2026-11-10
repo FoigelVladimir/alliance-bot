@@ -36,12 +36,17 @@ document.addEventListener("submit", async (event) => {
   if ("expected_assignment_version" in body) {
     body.expected_assignment_version = Number(body.expected_assignment_version);
   }
+  if ("expected_mode_version" in body) body.expected_mode_version = Number(body.expected_mode_version);
   button.disabled = true;
   errorBox.textContent = "";
   const release = beginMutation();
   let success = false;
+  let blocked = false;
   try {
     const result = await requestJson(form.action, { method: "POST", body, csrfToken: csrfmiddlewaretoken });
+    if (form.hasAttribute("data-ticket-result") && !/^[1-9][0-9]{0,18}$/.test(result?.ticket?.id ?? "")) {
+      throw new TypeError("The response does not confirm a ticket");
+    }
     success = true;
     button.blur();
     if (form.hasAttribute("data-attachment-prepare")) {
@@ -57,9 +62,19 @@ document.addEventListener("submit", async (event) => {
   } catch (error) {
     const details = error.payload?.error;
     errorBox.textContent = errors[details?.code] || details?.message || "Не удалось выполнить действие. Попробуйте ещё раз.";
+    if (form.hasAttribute("data-ai-join-command")) {
+      const link = form.querySelector("[data-human-ticket-link]");
+      const path = error.payload?.ticket_url;
+      if (details?.code === "human_ticket_exists" && /^\/support\/tickets\/[1-9][0-9]{0,18}\/$/.test(path ?? "")) {
+        link.href = path;
+        link.hidden = false;
+      }
+      blocked = ["human_ticket_exists", "ai_dialog_stale", "ai_dialog_inactive", "operation_superseded"].includes(details?.code)
+        || [401, 403, 404].includes(error.status);
+    }
   } finally {
     release(success);
-    button.disabled = success;
+    button.disabled = success || blocked;
   }
 });
 

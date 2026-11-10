@@ -5,7 +5,7 @@ from django.db import connection, transaction
 
 from accounts.policies import quarantine_incident
 from jobs.models import BackgroundTask as Task
-from jobs.services import CHANNEL, ClockTimestamp, LeaseLost, admit_external_call, claim, enqueue, finish
+from jobs.services import CHANNEL, ClockTimestamp, LeaseLost, admit_external_call, claim, defer, enqueue, finish
 from knowledge.search import SearchHit, sources_are_current
 from storage.services import database_time
 from vk_channel.client import DeliveryRejected, DeliveryUnknown
@@ -14,6 +14,7 @@ from vk_channel.models import LongPollCursor
 from .models import AIAnswer, AIAnswerInput, AIPartAttempt, AIPartDelivery, AIPartReconciliation, BotDeliveryRecoveryRun, Dialog, Message
 from .vk_keys import reserve_random_id
 from .attachment_responses import PROFILE as ATTACHMENT_PROMPT_PROFILE, valid_prompt
+from .context_responses import PROFILE as CONTEXT_PROMPT_PROFILE, valid_prompt as valid_context_prompt
 
 TASK_TYPE = "send_vk_bot_part"
 
@@ -34,6 +35,8 @@ def lock_chain(answer_id, *, verify_sources=False):
         snapshot = AIAnswer.objects.get(pk=answer_id)
         if snapshot.retrieval_snapshot.get("profile") == ATTACHMENT_PROMPT_PROFILE:
             sources_ok = valid_prompt(snapshot)
+        elif snapshot.retrieval_snapshot.get("profile") == CONTEXT_PROMPT_PROFILE:
+            sources_ok = valid_context_prompt(snapshot)
         else:
             hits = answer_hits(snapshot)
             sources_ok = bool(hits) and sources_are_current(hits)
@@ -63,6 +66,10 @@ def block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id):
         return "question_resolved"
     if not sources_ok:
         return "sources_changed"
+    from .ai_context import dispatch_waits_for_context
+
+    if dispatch_waits_for_context(run):
+        return "context_pending" if database_time() < run.processing_deadline_at else "context_budget_exhausted"
     return ""
 
 
@@ -89,6 +96,8 @@ def schedule_part(answer_id, community_id, peer_id):
     if next_part is None or next_part.status != "waiting":
         return False
     reason = block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id)
+    if reason == "context_pending":
+        return False
     if not reason and reserved_elsewhere(answer):
         reason = "request_version_already_reserved"
     now = database_time()
@@ -167,6 +176,9 @@ def admit(task, community_id, peer_id):
     if delivery.status != "pending" or attempt.status != "in_flight" or attempt.started_at is not None:
         raise LeaseLost(task.pk)
     reason = block_reason(cursor, dialog, answer, sources_ok, community_id, peer_id)
+    if reason == "context_pending":
+        defer(task)
+        return None
     if reason:
         finish(task, {"reason": reason}, status=Task.Status.FAILED)
         set_outcome(answer, delivery, attempt, "cancelled", database_time(), reason=reason)

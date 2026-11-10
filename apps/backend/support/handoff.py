@@ -1,7 +1,7 @@
 from django.db.models import Q
 
 from .ai_processing import handoff_active_requests
-from .models import InboundRoute, Message, Ticket
+from .models import AIContextResolution, InboundRoute, Message, Ticket
 
 MANAGER_REQUESTS = {
     "позвать менеджера",
@@ -44,6 +44,15 @@ def route_live_message(cursor, dialog, route, message):
 
     if not finish_explicit_handoff(cursor, dialog, ticket):
         handoff_active_requests(cursor, dialog, ticket)
+    # Earlier automatic inputs waiting for Qwen belong to this live handoff. Older
+    # messages awaiting a manual decision retain their separate review requirement.
+    context_routes = list(AIContextResolution.objects.filter(
+        status="pending", route__dialog=dialog, route__status="pending",
+        route__mode_version=route.mode_version, route__automation_epoch=route.automation_epoch,
+        route__historical=False, route__automation_paused=False, route__message__ticket__isnull=True,
+    ).values_list("route_id", flat=True))
+    Message.objects.filter(inboundroute__pk__in=context_routes).update(ticket=ticket)
+    InboundRoute.objects.filter(pk__in=context_routes).update(status="attached", reason="student_requested_manager")
     # Entries already stored behind this request in the same live cycle belong to the new card.
     following = InboundRoute.objects.filter(
         Q(status="pending") | Q(status="needs_review", reason="manual_support")

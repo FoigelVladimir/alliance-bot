@@ -105,6 +105,18 @@ def retry(task):
         _owned_update(task, locked_until=None, lease_token=None, **_after_failure(locked))
 
 
+def defer(task, delay=timedelta(seconds=0.5)):
+    """Wait for an internal dependency without spending a transport attempt."""
+    if delay <= timedelta(0):
+        raise ValueError("A dependency delay must be positive")
+    with transaction.atomic():
+        locked = Task.objects.select_for_update().get(pk=task.pk)
+        if locked.admitted_at is not None:
+            raise LeaseLost(task.pk)
+        _owned_update(task, status=Task.Status.RETRY, scheduled_at=ClockTimestamp() + delay,
+                      lease_token=None, locked_until=None, attempt_count=F("attempt_count") - 1)
+
+
 def recover_one(task_types):
     """Recover internal tasks only. External handlers must reconcile their domain records."""
     with transaction.atomic():

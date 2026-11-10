@@ -7,3 +7,9 @@ Pillow==13.0.0
 
 # PostgreSQL vector field for stage 1Г.
 pgvector==0.5.1
+
+# Bounded document/table ingestion and read-only Google service-account access.
+openpyxl==3.1.5
+defusedxml==0.7.1
+pypdf==7.0.0
+google-auth==2.62.1

@@ -29,7 +29,13 @@ ERROR_MESSAGES = {
     "invalid_content": "Укажите название до 200 символов и описание до 2000 символов.",
     "invalid_tags": "Можно указать до 20 меток, каждая длиной до 64 символов.",
     "text_too_large": "Текст превышает предел 64 КиБ UTF-8. Сократите его перед сохранением.",
-    "unsupported_source_type": "В этом разделе пока поддерживается только обычный текст.",
+    "unsupported_source_type": "Используйте TXT, DOCX, PDF с текстовым слоем, XLSX или ссылку Google Таблиц.",
+    "source_snapshot_changed": "Таблица изменилась. Откройте новый снимок и выберите колонки заново.",
+    "invalid_table_selection": "Выберите листы и колонки из текущего снимка.",
+    "empty_table_selection": "В выбранных колонках нет обычных значений. Формулы не включаются в текст.",
+    "text_too_large": "Подготовленный текст превышает 64 КиБ. Уменьшите источник или выберите меньше колонок.",
+    "source_file_too_large": "Максимальный размер файла — 10 МиБ.",
+    "invalid_google_url": "Нужна ссылка вида https://docs.google.com/spreadsheets/d/…",
     "invalid_request": "Не удалось прочитать форму. Проверьте поля и повторите сохранение.",
 }
 
@@ -75,11 +81,11 @@ def expected_revision(data):
 
 def form_values(version=None, request=None):
     if request is not None:
-        return {name: request.POST.get(name, "") for name in ("title", "description", "tags", "source_text")}
+        return {name: request.POST.get(name, "") for name in ("title", "description", "tags", "source_text", "source_type")}
     if version is None:
         return {"title": "", "description": "", "tags": "", "source_text": ""}
     return {"title": version.title, "description": version.description,
-            "tags": ", ".join(version.tags), "source_text": version.source_text}
+            "tags": ", ".join(version.tags), "source_text": version.source_text, "source_type": version.source_type}
 
 
 def render_page(request, template, context, *, status=200):
@@ -188,6 +194,12 @@ def draft(request, material_id, version_id):
 
 
 def draft_page(request, version, *, error=None, save_conflict=False):
+    from .sources import raw_access, source_state
+    can_read_source = True
+    try:
+        raw_access(support_actor(request.session), version)
+    except AccessError:
+        can_read_source = False
     state = preparation.preparation_data(version.current_preparation)
     snapshot = version.current_preparation.snapshot if state["status"] == "source_prepared" else None
     origin = getattr(version, "support_origin", None)
@@ -202,7 +214,9 @@ def draft_page(request, version, *, error=None, save_conflict=False):
     return render_page(request, "draft", {
         "material": version.material, "version": version, "operation_id": uuid4(), "prepare_operation_id": uuid4(),
         "publication_operation_id": uuid4(), "rebase_operation_id": uuid4(), "current_publication": current, "origin_ticket_id": origin_ticket_id,
-        "preparation": state, "snapshot": snapshot,
+        "preparation": state, "snapshot": snapshot, "source_state": source_state(version),
+        "can_read_source": can_read_source, "source_operation_id": uuid4(), "google_operation_id": uuid4(),
+        "refresh_operation_id": uuid4(),
         "form_values": form_values(request=request) if save_conflict else form_values(version),
         "error_message": ERROR_MESSAGES.get(error.code, "Действие недоступно.") if error else None,
         "show_comparison": bool(save_conflict and error.code == "draft_revision_conflict"),

@@ -1,0 +1,21 @@
+{% extends "base.html" %}{% load l10n %}
+{% block title %}Проверка мероприятия · {{ event.title }}{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-4xl px-4 py-8">
+  <a class="inline-flex min-h-12 items-center underline" href="{% url 'event-detail' event.pk %}">К мероприятию</a><h1 class="mt-3 text-3xl font-semibold">{{ event.title }}: {% if kind == 'start' %}начало{% elif kind == 'finish' %}завершение{% else %}досрочная остановка{% endif %}</h1>
+  {% if error_message %}<p class="mt-4 rounded-lg border border-red-700 p-3" role="alert">{{ error_message }}</p>{% endif %}
+  {% if kind == 'start' %}
+    <h2 class="mt-5 text-xl font-semibold">В снимок войдут</h2><ul class="mt-3 space-y-3">{% for entry in preview.entries %}<li class="rounded-lg border border-neutral-300 bg-white p-4"><strong>{{ entry.name|default:"Участник" }}</strong><p>Игроков: {{ entry.players|length }}. {{ entry.category }}</p><ul class="mt-2">{% for player in entry.players %}<li>{{ player.values.full_name }} · {{ player.values.student_number }}</li>{% endfor %}</ul></li>{% empty %}<li>Нет допущенных заявок.</li>{% endfor %}</ul>
+    {% if preview.pending_applications %}<h2 class="mt-5 text-xl font-semibold">Останутся без допуска</h2><ul class="mt-3">{% for entry in preview.pending_applications %}<li>{{ entry.name|default:"Заявка" }} · №{{ entry.application_id }}</li>{% endfor %}</ul>{% endif %}
+    <p class="mt-4">Старт зафиксирует состав. Первая подача, изменение состава и новые решения о допуске станут недоступны.</p>
+  {% else %}
+    <p class="mt-4">Незаполненных отметок участия: {{ preview.gaps.participation_unmarked|length }}. Итоги ожидают утверждённого регламента. Сохранённые факты и стартовый состав останутся в истории.</p>
+    {% if kind == 'finish' %}<p class="mt-3">Завершение подтверждает факт проведения. Незаполненные сведения останутся видны как неполнота.</p>{% else %}<p class="mt-3">Прерванное соревнование будет учитываться отдельно от проведённых. Остановка не выставляет технические результаты или неявки.</p>{% endif %}
+  {% endif %}
+  <form class="mt-5" method="post" action="{% if kind == 'start' %}{% url 'event-start' event.pk %}{% elif kind == 'finish' %}{% url 'event-finish' event.pk %}{% else %}{% url 'event-interruption' event.pk %}{% endif %}">{% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ operation_id }}"><input type="hidden" name="expected_event_revision" value="{{ preview.event_revision|unlocalize }}"><input type="hidden" name="{{ preview_field }}" value="{{ preview_version }}">
+    {% if kind == 'start' and preview.pending_applications %}<label class="flex min-h-12 items-start gap-3"><input class="mt-1 size-5" type="checkbox" name="confirm_pending_applications" required>Подтверждаю: перечисленные заявки останутся без допуска в этом соревновании.</label>{% endif %}
+    {% if kind == 'interrupt' %}<label class="block font-semibold" for="interruption-reason">Причина остановки</label><textarea class="mt-2 w-full rounded-lg border border-neutral-400 p-3" id="interruption-reason" name="reason" rows="3" maxlength="2000" required></textarea>{% endif %}
+    <button class="mt-4 min-h-12 rounded-lg bg-neutral-950 px-4 py-3 font-semibold text-white" type="submit">{% if kind == 'start' %}Подтвердить начало{% elif kind == 'finish' %}Подтвердить проведение и завершить{% else %}Остановить соревнование{% endif %}</button>
+  </form>
+</main>
+{% endblock %}

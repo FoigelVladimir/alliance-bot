@@ -5,7 +5,8 @@
 <main class="mx-auto max-w-4xl px-4 py-8 sm:px-6">
   <a class="inline-flex min-h-12 items-center underline" href="{% url 'support-ai-journal' %}">К журналу автоматической помощи</a>
   <h1 class="mt-3 text-3xl font-semibold">Попытка №{{ run.pk }}</h1>
-  <p class="mt-3">{{ run.finished_at|date:"d.m.Y, H:i" }} · {{ reason }}</p>
+  <p class="mt-3">{% if run.finished_at %}{{ run.finished_at|date:"d.m.Y, H:i" }}{% else %}{{ run.created_at|date:"d.m.Y, H:i" }}{% endif %} · {{ reason }}</p>
+  {% include "support/ai_join.html" %}
   {% if ticket %}
     <a class="mt-3 inline-flex min-h-12 items-center underline" href="{% url 'support-ticket' ticket.pk %}">Перейти к обращению №{{ ticket.pk }}</a>
   {% endif %}
@@ -13,6 +14,13 @@
     <section class="mt-6 border border-neutral-300 p-4">
       <h2 class="text-xl font-semibold">Вопрос · версия {{ input.request_version }}</h2>
       <p class="mt-3 whitespace-pre-wrap break-words">{{ input.question_text }}</p>
+      <details class="mt-3">
+        <summary class="min-h-12 cursor-pointer">Исходные сообщения</summary>
+        {% for message in input.messages.all %}
+          <p class="mt-3 text-sm">{{ message.created_at|date:"d.m.Y, H:i" }}</p>
+          <p class="mt-2 whitespace-pre-wrap break-words">{{ message.text|default:"Сообщение без текста" }}</p>
+        {% endfor %}
+      </details>
       {% if input.request.resolved_at and input.request_version == input.request.request_version %}
         <p class="mt-3 text-sm">Студент подтвердил решение {{ input.request.resolved_at|date:"d.m.Y, H:i" }} · ВК {{ input.request.resolved_by_vk_id }}</p>
       {% endif %}

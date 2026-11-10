@@ -15,11 +15,11 @@ from knowledge.search import hybrid_search, sources_are_current
 from storage.services import database_time
 from vk_channel.models import LongPollCursor
 
-from .ai_delivery import cancel_for_handoff
+from .ai_delivery import cancel_for_handoff, cancel_unstarted_parts
 from .ai_generation import GeneratedAnswer, ModelUnavailable, generate_quote, save_answer
 from .attachment_responses import save_prompt
 from .models import (
-    AIPartDelivery, AIProcessingInput, AIProcessingInputMessage, AIProcessingRun, AIRequest, AIRequestMessage,
+    AIAnswer, AIPartDelivery, AIProcessingInput, AIProcessingInputMessage, AIProcessingRun, AIRequest, AIRequestMessage,
     Dialog, InboundRoute, Message,
 )
 
@@ -40,6 +40,10 @@ def begin_lookup(cursor, dialog, route, message):
     text = " ".join(message.text.split())
     if (not text and not message.attachments.exists()) or len(text) > QUESTION_LIMIT:
         return False
+    if settings.SUPPORT_AI_CONTEXT_ENABLED and text:
+        from .ai_context import enqueue_context
+
+        return enqueue_context(cursor, dialog, route, message)
     now = database_time()
     request = None
     if route.reply_to_cmid is not None:
@@ -52,14 +56,24 @@ def begin_lookup(cursor, dialog, route, message):
         ).first()
         if request is None or len(request.normalized_query) + 1 + len(text) > QUESTION_LIMIT:
             return False
+    create_question_run(cursor, dialog, route, message, request=request, text=text)
+    return True
+
+
+def create_question_run(cursor, dialog, route, message, *, request=None, text=None, query=None,
+                        started_at=None, task=None, deadline=None, refresh_plans=True):
+    """The caller holds the channel/dialog locks; original message rows stay intact."""
+    now = database_time()
+    started_at = started_at or now
+    text = " ".join(message.text.split()) if text is None else text
+    old_version = request.request_version if request else None
     if request is None:
         request = AIRequest.objects.create(
             dialog=dialog, mode_version=dialog.mode_version, automation_epoch=cursor.automation_epoch,
-            request_version_started_at=now, created_at=now, normalized_query=text,
+            request_version_started_at=started_at, created_at=now, normalized_query=query if query is not None else text,
         )
     else:
-        running = AIProcessingRun.objects.filter(inputs__request=request, status="running").first()
-        if running is not None:
+        for running in AIProcessingRun.objects.filter(inputs__request=request, status="running").distinct().order_by("pk"):
             Task.objects.filter(pk=running.task_id).update(
                 status=Task.Status.FAILED, result={"reason": "superseded"},
                 lease_token=None, locked_until=None, updated_at=now,
@@ -67,16 +81,17 @@ def begin_lookup(cursor, dialog, route, message):
             record_no_answer(running, "superseded", now)
         request.request_version += 1
         request.status, request.finished_at = "pending", None
-        request.request_version_started_at = now
-        request.normalized_query = "\n".join(part for part in (request.normalized_query, text) if part)
+        request.request_version_started_at = started_at
+        request.normalized_query = query if query is not None else "\n".join(part for part in (request.normalized_query, text) if part)
         request.save(update_fields=["request_version", "request_version_started_at", "normalized_query", "status", "finished_at"])
     AIRequestMessage.objects.create(request=request, message=message)
 
-    operation = uuid4()
-    task = enqueue(TASK_TYPE, operation, {"dialog_id": dialog.pk}, priority=10)
+    operation = task.idempotency_key if task else uuid4()
+    task = task or enqueue(TASK_TYPE, operation, {"dialog_id": dialog.pk}, priority=10)
     run = AIProcessingRun.objects.create(
         operation_id=operation, task=task, dialog=dialog, mode_version=dialog.mode_version,
-        automation_epoch=cursor.automation_epoch, created_at=now, processing_deadline_at=now + LOOKUP_BUDGET,
+        automation_epoch=cursor.automation_epoch, created_at=started_at,
+        processing_deadline_at=deadline or started_at + LOOKUP_BUDGET,
     )
     snapshot = AIProcessingInput.objects.create(
         run=run, request=request, request_version=request.request_version, question_text=request.normalized_query,
@@ -88,18 +103,26 @@ def begin_lookup(cursor, dialog, route, message):
     route.status, route.reason = "ai_processing", ""
     from .handoff_plans import refresh_dialog_plans
 
-    refresh_dialog_plans(cursor, dialog)
+    if refresh_plans:
+        refresh_dialog_plans(cursor, dialog)
+    if old_version is not None:
+        for answer in AIAnswer.objects.filter(inputs__request=request,
+                inputs__request_version_snapshot__lte=old_version).distinct().order_by("pk"):
+            cancel_unstarted_parts(answer.pk, now, "question_changed")
     if dialog.mode != "ai_auto":
         route.refresh_from_db(fields=["status", "reason"])
-    return True
+    return run, request
 
 
 def record_no_answer(run, reason, now, hits=()):
+    from .ai_join import completion_deadline
+
     run.status, run.reason, run.finished_at = "no_answer", reason, now
+    run.join_until = completion_deadline(now, reason)
     run.sources_used = [
         {key: value for key, value in asdict(hit).items() if key not in {"content", "heading"}} for hit in hits
     ]
-    run.save(update_fields=["status", "reason", "finished_at", "sources_used"])
+    run.save(update_fields=["status", "reason", "finished_at", "join_until", "sources_used"])
 
 
 def lock_run(run_id, hits=()):
@@ -160,6 +183,19 @@ def recover_expired_lookup():
 
 
 def run_lookup_once(search=hybrid_search, generate=generate_quote):
+    from .generation_slot import generation_slot
+
+    with generation_slot() as acquired:
+        if not acquired:
+            return False
+        from .ai_context import run_context_once
+
+        if run_context_once():
+            return True
+        return _run_lookup_once(search, generate)
+
+
+def _run_lookup_once(search, generate):
     while recover_expired_lookup():
         pass
     task = claim([TASK_TYPE])
@@ -258,7 +294,7 @@ def handoff_active_requests(cursor, dialog, ticket, *, reason="student_requested
     """Link active questions to the card while the caller still holds the mode locks."""
     now = database_time()
     active = AIRequest.objects.filter(
-        Q(pk__in=planned_request_ids) | Q(status__in=("pending", "failed", "answered_partial")) | Q(status="answered_full", aianswerinput__answer__parts__aipartdelivery__status__in=(
+        Q(pk__in=planned_request_ids) | Q(status__in=("pending", "failed", "answered_partial", "awaiting_clarification")) | Q(status="answered_full", aianswerinput__answer__parts__aipartdelivery__status__in=(
             "waiting", "pending", "unknown_outcome", "failed", "cancelled",
         )),
         dialog=dialog, mode_version=dialog.mode_version, automation_epoch=cursor.automation_epoch,
@@ -287,6 +323,10 @@ def handoff_active_requests(cursor, dialog, ticket, *, reason="student_requested
         inputs__request_id__in=request_ids, status="answer_saved", handoff_ticket__isnull=True,
         mode_version=dialog.mode_version, automation_epoch=cursor.automation_epoch,
     ).distinct().order_by("answer_id")
+    AIProcessingRun.objects.filter(
+        inputs__request_id__in=request_ids, status="no_answer", handoff_ticket__isnull=True,
+        mode_version=dialog.mode_version, automation_epoch=cursor.automation_epoch,
+    ).update(handoff_ticket=ticket)
     for run in saved:
         run.handoff_ticket = ticket
         run.save(update_fields=["handoff_ticket"])

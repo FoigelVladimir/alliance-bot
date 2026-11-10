@@ -1,0 +1,9 @@
+{% load l10n %}
+<section class="mt-6"><h2 class="text-xl font-semibold">Фактическое участие по снимку старта</h2>
+  <p class="mt-3">Допуск и результат матча не выставляют отметку автоматически. В отчёт попадут игроки стартового состава отмеченных команд.</p>
+  {% for item in participation %}<form class="mt-4 rounded-xl border border-neutral-300 bg-white p-4" method="post" action="{% url 'event-participation' event.pk item.id %}">{% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ item.operation_id }}"><input type="hidden" name="expected_participation_revision" value="{{ item.revision|unlocalize }}">
+    <p class="font-semibold">{{ item.name|default:"Участник" }}</p><p class="mt-2">Сейчас: {{ item.mark_label }}. В стартовом составе: {{ item.players|length }}.</p>
+    <label class="mt-3 block" for="participation-{{ item.id }}">Отметка</label><select class="mt-2 min-h-12 w-full rounded-lg border border-neutral-400 p-3" id="participation-{{ item.id }}" name="mark"><option value="unmarked"{% if item.mark == 'unmarked' %} selected{% endif %}>Не отмечено</option><option value="participated"{% if item.mark == 'participated' %} selected{% endif %}>Участвовала</option><option value="not_participated"{% if item.mark == 'not_participated' %} selected{% endif %}>Не участвовала</option></select>
+    <label class="mt-3 block" for="participation-note-{{ item.id }}">Пояснение к исправлению, по желанию</label><input class="mt-2 min-h-12 w-full rounded-lg border border-neutral-400 p-3" id="participation-note-{{ item.id }}" name="correction_note" maxlength="2000"><button class="mt-3 min-h-12 rounded-lg border border-neutral-700 px-4 py-2" type="submit">Сохранить отметку</button>
+  </form>{% empty %}<p class="mt-3">В снимке старта нет допущенных участников.</p>{% endfor %}
+</section>

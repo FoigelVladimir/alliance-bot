@@ -399,6 +399,7 @@ class AIProcessingRun(models.Model):
     created_at = models.DateTimeField()
     processing_deadline_at = models.DateTimeField()
     finished_at = models.DateTimeField(null=True)
+    join_until = models.DateTimeField(null=True)
 
     class Meta:
         db_table = "support_ai_processing_run"
@@ -409,7 +410,37 @@ class AIProcessingRun(models.Model):
                 | Q(status="answer_saved", reason="", finished_at__isnull=False, answer__isnull=False),
                 name="support_ai_run_outcome",
             ),
+            models.CheckConstraint(
+                condition=Q(join_until__isnull=True)
+                | (Q(status__in=["answer_saved", "no_answer"], finished_at__isnull=False,
+                     join_until__gte=F("finished_at")) & ~Q(reason__in=["superseded", "recovered_from_backup"])),
+                name="support_ai_join_deadline",
+            ),
         ]
+
+
+class AIContextResolution(models.Model):
+    route = models.OneToOneField(InboundRoute, on_delete=models.PROTECT, related_name="context_resolution")
+    task = models.OneToOneField("jobs.BackgroundTask", on_delete=models.PROTECT)
+    run = models.OneToOneField(AIProcessingRun, null=True, on_delete=models.PROTECT, related_name="context_resolution")
+    request = models.ForeignKey(AIRequest, null=True, on_delete=models.PROTECT, related_name="context_resolutions")
+    resolved_by = models.ForeignKey("self", null=True, on_delete=models.PROTECT, related_name="clarified")
+    status = models.CharField(max_length=16, default="pending")
+    decision = models.JSONField(default=dict)
+    model_snapshot = models.JSONField(default=dict)
+    created_at = models.DateTimeField()
+    processing_deadline_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True)
+
+    class Meta:
+        db_table = "support_ai_context_resolution"
+        constraints = [models.CheckConstraint(
+            condition=Q(status="pending", finished_at__isnull=True, run__isnull=True, request__isnull=True)
+            | Q(status__in=["applied", "clarification", "failed", "superseded"], finished_at__isnull=False),
+            name="support_ai_context_outcome",
+        )]
+        indexes = [models.Index(fields=["processing_deadline_at", "id"],
+                               condition=Q(status="pending"), name="support_ai_context_deadline")]
 
 
 class AIProcessingInput(models.Model):

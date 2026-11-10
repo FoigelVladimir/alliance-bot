@@ -33,11 +33,11 @@ def require_draft_access(actor, version):
 
 
 
-def validate_content(content):
+def validate_content(content, *, source_type="text"):
     expected = {"title", "description", "tags", "source_type", "source_text"}
     if set(content) != expected or any(not isinstance(content[key], str) for key in expected - {"tags"}):
         raise AccessError("invalid_request", 400)
-    if content["source_type"] != "text":
+    if content["source_type"] != source_type or (source_type != "text" and content["source_text"]):
         raise AccessError("unsupported_source_type", 422)
     tags = content["tags"]
     try:
@@ -129,7 +129,7 @@ def save_draft(session, material_id, version_id, operation_id, expected_revision
     if version is None:
         raise AccessError("draft_not_found", 404)
     require_draft_access(actor, version)
-    validate_content(content)
+    validate_content(content, source_type=version.source_type)
     if type(expected_revision) is not int or not 0 < expected_revision < 2**63:
         raise AccessError("invalid_request", 400)
     command, created = reserve_command(actor, operation_id, "save_draft", material.pk, version.pk, content, expected_revision)
@@ -150,6 +150,11 @@ def save_draft(session, material_id, version_id, operation_id, expected_revision
 
 
 def supersede_preparation(version):
+    if version.current_source_read_id:
+        Task.objects.filter(pk=version.current_source_read.task_id, status__in=(*READY, Task.Status.PROCESSING)).update(
+            status=Task.Status.FAILED, result={"reason": "superseded"}, lease_token=None, locked_until=None,
+            updated_at=ClockTimestamp(),
+        )
     if version.current_preparation_id:
         task_ids = [version.current_preparation.task_id]
         task_ids.extend(FragmentGeneration.objects.filter(

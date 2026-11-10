@@ -10,6 +10,8 @@
     </p>
     {% if ticket.handoff_reason == "student_requested_manager" %}
       <p class="mt-2 text-sm text-neutral-700">Студент попросил позвать менеджера.</p>
+    {% elif ticket.handoff_reason == "manager_joined" %}
+      <p class="mt-2 text-sm text-neutral-700">Сотрудник подключился к автоматическому диалогу.</p>
     {% endif %}
     {% if can_take %}
       <form class="mt-4" action="{% url 'support-take' ticket.pk %}" method="post" data-support-command>
@@ -164,12 +166,23 @@
           {% else %}Отправка отменена{% endif %}
         {% else %}
           {% if record.command.action == "take" %}Обращение взято в работу
+          {% elif record.command.action == "join_ai_dialog" %}Сотрудник подключился к диалогу
           {% elif record.command.action == "return_to_queue" %}Обращение возвращено в очередь
           {% elif record.command.action == "close" %}Обращение закрыто
           {% else %}Владелец обращения изменился{% endif %}
         {% endif %}
         · {{ instant|date:"j E, H:i" }}
       </p>
+      {% if kind == 2 and record.command.action == "join_ai_dialog" %}
+        <a class="mt-3 inline-flex min-h-12 items-center underline" href="{% url 'support-ai-processing-run' record.payload.run_id %}">Открыть исходную обработку бота</a>
+        <details class="mt-3">
+          <summary class="min-h-12 cursor-pointer">Контекст при подключении сотрудника</summary>
+          {% for item in record.payload.work_snapshot %}
+            <p class="mt-3 whitespace-pre-wrap break-words">{% if item.kind == "question" %}{{ item.question }}{% else %}{{ item.text }}{% endif %}</p>
+            {% if item.remaining_work %}<p class="mt-2 text-sm">{{ item.remaining_work }}</p>{% endif %}
+          {% endfor %}
+        </details>
+      {% endif %}
       {% if kind == 0 or kind == 1 %}
         <p class="mt-2 whitespace-pre-wrap break-words">{{ record.text|default:"Сообщение без текста" }}</p>
         {% if kind == 0 %}{% support_attachments record %}{% endif %}

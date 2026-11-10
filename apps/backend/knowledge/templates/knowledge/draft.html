@@ -29,6 +29,7 @@
       {% include "knowledge/fields.html" %}
       <button class="mt-5 min-h-12 rounded-lg bg-neutral-950 px-4 py-3 font-semibold text-white" type="submit">{% if new_draft %}Создать отдельный черновик{% else %}Сохранить черновик{% endif %}</button>
     </form>
+    {% if version and can_read_source %}{% include "knowledge/source_controls.html" %}{% endif %}
   {% else %}<p class="mt-6">Этот снимок больше нельзя редактировать.</p><p class="mt-4 whitespace-pre-wrap break-words">{{ version.source_text }}</p>{% endif %}
   {% if version and not version.sealed_at %}
     <section class="mt-6 rounded-xl border border-neutral-300 bg-white p-6" aria-labelledby="prepare-title">
@@ -107,6 +108,14 @@
         </form>
       </section>
     {% endif %}
+  {% endif %}
+  {% if version.source_type == 'google' and can_read_source %}
+    <form class="mt-4" method="post" action="{% url 'knowledge-refresh-google' material.pk version.pk %}">
+      {% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ refresh_operation_id }}">
+      <input type="hidden" name="expected_publication_revision" value="{{ material.publication_revision|unlocalize }}">
+      <p>Обновление создаст новый черновик. Проверьте выбор колонок и текст перед публикацией.</p>
+      <button class="mt-3 min-h-12 rounded-lg border border-neutral-700 px-4 py-2" type="submit">Обновить из Google</button>
+    </form>
   {% endif %}
   {% if version %}<a class="mt-4 inline-flex min-h-12 items-center underline" href="{% url 'knowledge-new-draft' material.pk %}">Добавить отдельный черновик</a>{% endif %}
 </main>

@@ -28,6 +28,11 @@ ERROR_MESSAGES = {
     "invalid_request": "Проверьте заполненные поля.",
     "not_found": "Запись не найдена.",
     "ai_answer_not_found": "Ответ не найден.",
+    "ai_processing_run_not_found": "Обработка не найдена.",
+    "ai_dialog_stale": "Вопрос или режим диалога изменился. Обновите страницу.",
+    "ai_dialog_inactive": "Подключение к этой автоматической обработке уже недоступно.",
+    "human_ticket_exists": "Диалог уже передан сотрудникам. Откройте существующее обращение.",
+    "operation_superseded": "Обращение закрыто или его назначение изменилось.",
     "review_revision_conflict": "Оценка изменилась. Сравните её со своими правками.",
     "comment_too_long": "Комментарий может содержать не более 2000 символов.",
     "review_revision_exhausted": "Достигнут предел ревизий оценки.",
@@ -124,6 +129,8 @@ def callback(request):
     success = services.finish_login(request.session, attempt, identity)
     if success and attempt.recovery_id:
         return redirect("leader-recovery-confirmed")
+    if success and request.session.get("participant_return"):
+        return redirect("participant-entry")
     return home_redirect(None if success else "failed")
 
 

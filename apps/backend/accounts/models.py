@@ -1,9 +1,12 @@
+from uuid import uuid4
+
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 
 
 class StaffProfile(models.Model):
+    stable_id = models.UUIDField(default=uuid4, unique=True, editable=False)
     class Access(models.TextChoices):
         NOT_GRANTED = "not_granted"
         GRANTED = "granted"

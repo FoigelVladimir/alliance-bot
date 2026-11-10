@@ -1,0 +1,30 @@
+{% extends "base.html" %}{% load l10n %}
+{% block title %}Выбор колонок — {{ version.title }}{% endblock %}
+{% block content %}
+<main class="mx-auto w-full max-w-5xl p-4 sm:p-6">
+  <a class="inline-flex min-h-12 items-center underline" href="{% url 'knowledge-draft' version.material_id version.pk %}">К материалу</a>
+  <h1 class="mt-4 text-2xl font-bold">{{ version.title }}: листы и колонки</h1>
+  <p class="mt-3">Выберите полный набор колонок. Ниже приведены первые 10 строк для проверки структуры. После сохранения откройте подготовленный текст в карточке материала и проверьте все факты перед публикацией.</p>
+  <p class="mt-3">Формулы исключаются. Скрытые листы и колонки не показываются. Чтобы включить их, сделайте их видимыми в исходной таблице и прочитайте её заново.</p>
+  {% if error_message %}<p class="mt-4 rounded-lg border border-red-700 p-3" role="alert">{{ error_message }}</p>{% endif %}
+  {% if catalog.issues %}<p class="mt-4" role="alert">Структура изменилась: прежний выбор нельзя перенести полностью. Проверьте все листы и подтвердите выбор заново.</p>{% endif %}
+  <form method="post" class="mt-5">
+    {% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ operation_id }}">
+    <input type="hidden" name="expected_draft_revision" value="{{ version.draft_revision|unlocalize }}">
+    <input type="hidden" name="source_snapshot_id" value="{{ catalog.source_snapshot_id }}">
+    {% for sheet in catalog.sheets %}
+      <fieldset class="mt-5 rounded-xl border border-neutral-300 bg-white p-4">
+        <legend class="px-2 text-xl font-semibold">{{ sheet.title }}</legend>
+        {% if sheet.blocked_reason %}<p>Лист нельзя подготовить. Уберите объединённые ячейки, массивные формулы и скрытые строки и прочитайте источник заново.</p>
+        {% else %}
+          {% for column in sheet.columns %}
+            <label class="inline-flex min-h-12 items-center gap-2 pr-5"><input class="size-5" type="checkbox" name="column.{{ sheet.key }}.{{ column.key }}"{% if column.selected %} checked{% endif %}{% if version.sealed_at %} disabled{% endif %}>{{ column.header|default:"Без заголовка" }} ({{ column.position }})</label>
+          {% endfor %}
+          <div class="mt-3 overflow-x-auto"><table class="w-full border-collapse text-sm"><thead><tr>{% for column in sheet.columns %}<th class="border border-neutral-300 p-2 text-left">{{ column.header|default:"Без заголовка" }}</th>{% endfor %}</tr></thead><tbody>{% for row in sheet.sample_rows %}<tr>{% for cell in row %}<td class="border border-neutral-300 p-2 whitespace-pre-wrap break-words">{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+        {% endif %}
+      </fieldset>
+    {% empty %}<p>Нет видимых листов для выбора.</p>{% endfor %}
+    {% if not version.sealed_at %}<button class="mt-5 min-h-12 rounded-lg bg-neutral-950 px-4 py-3 font-semibold text-white" type="submit">Сохранить выбор и подготовить текст</button>{% endif %}
+  </form>
+</main>
+{% endblock %}

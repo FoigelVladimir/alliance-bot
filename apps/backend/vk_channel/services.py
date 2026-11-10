@@ -289,7 +289,15 @@ def route_inbound_task(task):
         route = InboundRoute.objects.select_for_update().get(pk=task.payload["route_id"])
         if route.status == "pending":
             message = Message.objects.select_for_update().get(pk=route.message_id)
-            if message.ticket_id:
+            from participants.services import route_message
+            participant_handled = (
+                not route.historical and not route.automation_paused and not cursor.automation_paused
+                and route.automation_epoch == cursor.automation_epoch and not quarantine_incident()
+                and route_message(cursor, message)
+            )
+            if participant_handled:
+                route.status, route.reason = "handled", "participant_command"
+            elif message.ticket_id:
                 route.status = "attached"
             elif route.historical:
                 route.status, route.reason = "needs_review", "historical"

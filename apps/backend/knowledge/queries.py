@@ -38,11 +38,13 @@ def material_data(material):
 
 
 def draft_data(version):
+    from .sources import source_state
     preparation = preparation_data(version.current_preparation)
     return {
         "id": str(version.pk), "material_id": str(version.material_id),
         "title": version.title, "description": version.description, "tags": version.tags,
         "source_type": version.source_type, "source_text": version.source_text,
+        "source": source_state(version),
         "draft_revision": version.draft_revision, "base_publication_revision": version.base_publication_revision,
         "needs_rebase": version.base_publication_revision != version.material.publication_revision,
         "created_by_id": str(version.created_by_id), "updated_by_id": str(version.updated_by_id),

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Статус удаления · Альянс{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-3xl px-4 py-8"><a class="inline-flex min-h-12 items-center underline" href="{% url 'event-catalog' %}">Мероприятия</a><h1 class="mt-3 text-3xl font-semibold">{% if deletion.status == 'deleted' %}Удаление подтверждено{% elif deletion.status == 'needs_review' %}Удаление требует сверки{% else %}Удаление выполняется{% endif %}</h1>
+  <p class="mt-4">ID операции: {{ deletion.id }}</p>
+  {% if deletion.status == 'deleted' %}<p class="mt-3">Запись подтверждена независимым журналом. Мероприятие и заявки закрыты.</p><p class="mt-3">{% if deletion.cleaned_at %}Содержимое заявок очищено.{% else %}Очистка содержимого выполняется в фоне.{% endif %}</p>{% elif deletion.status == 'needs_review' %}<p class="mt-3">Данные операции расходятся с журналом. Мероприятие остаётся закрытым; требуется проверка оператором.</p>{% else %}<p class="mt-3">Доступ закрыт. Обработчик ожидает подтверждения отдельного журнала. Это ещё не подтверждение окончательного удаления.</p>{% endif %}
+  {% if deletion.notification_verification_required %}<p class="mt-3">Исход уведомления нужно сверить после восстановления. Автоматическая повторная отправка не запускается.</p>{% elif deletion.notice_mode == 'notify' %}<p class="mt-3">{% if deletion.notification_batch_id %}Задание уведомления об отмене сохранено.{% else %}Задание об отмене будет создано после подтверждения удаления.{% endif %}</p>{% elif deletion.notice_mode == 'already_notified' %}<p class="mt-3">Организатор подтвердил уведомление другим способом.</p>{% endif %}
+  <a class="mt-4 inline-flex min-h-12 items-center underline" href="{% url 'event-deletion-status' deletion.id %}">Обновить состояние</a>
+</main>
+{% endblock %}

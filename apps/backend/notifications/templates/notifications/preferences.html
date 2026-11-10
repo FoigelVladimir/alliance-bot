@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% load l10n %}
+{% block title %}Мои уведомления · Альянс{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-4xl px-4 py-8"><a class="inline-flex min-h-12 items-center underline" href="{% url 'participant-requests' %}">Мои заявки</a><h1 class="mt-3 text-3xl font-semibold">{% if initial %}Выберите уведомления{% else %}Мои уведомления{% endif %}</h1>
+  <p class="mt-4">Разрешите нужные категории для всего клуба или отдельных мероприятий и секций. Невыбранные категории не включаются сами. Отдельный запрет и общее отключение имеют приоритет.</p>
+  <p class="mt-3">Своё расписание и статусы можно запросить в боте и без инициативных сообщений.</p>
+  {% if settings.verification_required %}<p class="mt-4" role="alert">После восстановления отправки закрыты. Проверьте весь показанный выбор и подтвердите актуальные настройки.</p>{% endif %}
+  {% if error_message %}<p class="mt-4 rounded-lg border border-red-700 p-3" role="alert">{{ error_message }}</p><details class="mt-3"><summary class="cursor-pointer underline">Текущий сохранённый выбор</summary><p>Общее отключение: {{ settings.all_disabled|yesno:"да,нет" }}.</p>{% for scope in current_scopes %}<p class="mt-3 font-semibold">{{ scope.name }}</p><ul>{% for category in scope.categories %}<li>{{ category.name }}: {% if category.value == 'allow' %}разрешено{% elif category.value == 'deny' %}запрещено{% else %}не выбрано{% endif %}</li>{% endfor %}</ul>{% endfor %}</details>{% endif %}
+  <form class="mt-5" method="post">{% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ operation_id }}"><input type="hidden" name="expected_revision" value="{{ settings.revision|unlocalize }}">
+    <label class="flex min-h-12 items-center gap-3"><input class="size-5" type="checkbox" name="all_disabled"{% if values.all_disabled %} checked{% endif %}>Отключить все инициативные сообщения</label>
+    {% for scope in scopes %}<fieldset class="mt-5 rounded-xl border border-neutral-300 bg-white p-5"><legend class="px-2 text-xl font-semibold">{{ scope.name }}</legend>
+      {% for category in scope.categories %}<label class="mt-3 block font-semibold" for="choice-{{ scope.kind }}-{{ scope.id }}-{{ category.key }}">{{ category.name }}</label><select class="mt-2 min-h-12 w-full rounded-lg border border-neutral-400 p-3" id="choice-{{ scope.kind }}-{{ scope.id }}-{{ category.key }}" name="choice.{{ scope.kind }}.{{ scope.id|unlocalize }}.{{ category.key }}"><option value=""{% if not category.value %} selected{% endif %}>Не выбрано</option><option value="allow"{% if category.value == 'allow' %} selected{% endif %}>Разрешить</option><option value="deny"{% if category.value == 'deny' %} selected{% endif %}>Запретить</option></select>{% endfor %}
+    </fieldset>{% endfor %}
+    <button class="mt-5 min-h-12 rounded-lg bg-neutral-950 px-4 py-3 font-semibold text-white" type="submit">Сохранить мой выбор</button>
+  </form>
+  {% if initial %}<form class="mt-4" method="post" action="{% url 'participant-notifications-skip' %}">{% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ skip_operation_id }}"><input type="hidden" name="expected_revision" value="{{ settings.revision|unlocalize }}"><button class="min-h-12 px-2 underline" type="submit">Пропустить выбор</button></form>{% endif %}
+</main>
+{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}{% load l10n tz %}
+{% block title %}{{ event.title }} · Альянс{% endblock %}
+{% block content %}
+<main class="mx-auto max-w-5xl px-4 py-8">
+  <a class="inline-flex min-h-12 items-center underline" href="{% url 'event-catalog' %}">Мероприятия</a>
+  <h1 class="mt-3 text-3xl font-semibold">{{ event.title }}</h1><p class="mt-3">{{ event_data.state_label }} · {{ event.sport }}</p>
+  {% if event.reporting_excluded %}<p class="mt-3 rounded-lg border border-neutral-500 p-3">Исключено из отчётности. {{ event.reporting_reason }}</p>{% endif %}
+  {% if error_message %}<p class="mt-4 rounded-lg border border-red-700 p-3" role="alert">{{ error_message }}</p>{% endif %}
+  <p class="mt-3">Ответственный: {{ event.responsible.display_name|default:"Не указано имя" }}</p>
+  <a class="mt-3 inline-flex min-h-12 items-center underline" href="{% url 'event-public' event.pk %}">Публичная страница и условия</a>
+  {% if event.state == 'planned' %}
+    <details class="mt-5 rounded-xl border border-neutral-300 bg-white p-5"><summary class="cursor-pointer font-semibold">Настройки карточки</summary>
+      <form class="mt-3" method="post" action="{% url 'event-save' event.pk %}">{% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ card_operation_id }}"><input type="hidden" name="expected_event_revision" value="{{ event.revision|unlocalize }}">
+        {% if card_values %}{% include 'events/card_fields.html' with values=card_values %}{% else %}{% include 'events/card_fields.html' with values=event_data %}{% endif %}
+        <p class="mt-3 text-sm">Смена формата участия выполняется через редакцию формы регистрации.</p><button class="mt-4 min-h-12 rounded-lg border border-neutral-700 px-4 py-2" type="submit">Сохранить карточку</button>
+      </form>
+    </details>
+    {% include "events/registration_controls.html" %}
+  {% endif %}
+  <section class="mt-6 rounded-xl border border-neutral-300 bg-white p-5"><h2 class="text-xl font-semibold">Команда организаторов</h2>
+    <ul class="mt-3">{% for helper in event_data.helpers %}<li>{{ helper.name|default:"Сотрудник" }}</li>{% empty %}<li>Помощники не назначены.</li>{% endfor %}</ul>
+    {% if is_responsible %}<form class="mt-4" method="post" action="{% url 'event-helpers' event.pk %}">{% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ helper_operation_id }}"><input type="hidden" name="expected_event_revision" value="{{ event.revision|unlocalize }}">
+      <label class="block font-semibold" for="helper-profile">Сотрудник</label><select class="mt-2 min-h-12 w-full rounded-lg border border-neutral-400 p-3" id="helper-profile" name="helper_profile_id">{% for candidate in candidates %}<option value="{{ candidate.id }}">{{ candidate.name }}</option>{% endfor %}{% for helper in event_data.helpers %}<option value="{{ helper.profile_id }}">{{ helper.name }} (назначен)</option>{% endfor %}</select>
+      <button class="mt-3 min-h-12 rounded-lg border border-neutral-700 px-4 py-2" name="action" value="add" type="submit">Добавить помощника</button><button class="mt-3 min-h-12 px-4 py-2 underline" name="action" value="remove" type="submit">Снять помощника</button>
+    </form>{% endif %}
+    {% if is_responsible or actor.role == 'leader' %}<form class="mt-5" method="post" action="{% url 'event-responsible' event.pk %}">{% csrf_token %}<input type="hidden" name="client_operation_id" value="{{ responsible_operation_id }}"><input type="hidden" name="expected_event_revision" value="{{ event.revision|unlocalize }}">
+      <label class="block font-semibold" for="responsible-profile">Новый ответственный</label><select class="mt-2 min-h-12 w-full rounded-lg border border-neutral-400 p-3" id="responsible-profile" name="responsible_profile_id">{% for candidate in candidates %}<option value="{{ candidate.id }}">{{ candidate.name }}</option>{% endfor %}</select>
+      <label class="mt-3 block" for="replacement-reason">Причина замены руководителем</label><textarea class="mt-2 w-full rounded-lg border border-neutral-400 p-3" id="replacement-reason" name="replacement_reason" rows="2" maxlength="1000"></textarea><button class="mt-3 min-h-12 rounded-lg border border-neutral-700 px-4 py-2" type="submit">Передать ответственность</button>
+    </form>{% endif %}
+  </section>
+  <section class="mt-6"><h2 class="text-xl font-semibold">Поданные заявки</h2><div class="mt-3 grid gap-3">{% for application in applications %}<a class="rounded-lg border border-neutral-300 bg-white p-4" href="{% url 'event-application' event.pk application.pk %}?view=staff">{{ application.values.team_name|default:application.owner.full_name }} · {{ application.status_label }}</a>{% empty %}<p>Поданных заявок пока нет.</p>{% endfor %}</div></section>
+  {% if is_organiser %}
+    {% if event.state == 'planned' %}<a class="mt-5 inline-flex min-h-12 items-center rounded-lg bg-neutral-950 px-4 py-3 font-semibold text-white" href="{% url 'event-start-preview' event.pk %}">Проверить состав и начать</a>{% endif %}
+    {% if event.started_at %}{% include 'events/participation.html' %}{% endif %}
+    {% if event.state == 'started' %}<a class="mt-5 inline-flex min-h-12 items-center rounded-lg border border-neutral-700 px-4 py-3" href="{% url 'event-finish-preview' event.pk %}">Проверить и завершить</a><a class="mt-5 inline-flex min-h-12 items-center px-4 py-3 underline" href="{% url 'event-interruption-preview' event.pk %}">Досрочная остановка</a>{% endif %}
+  {% endif %}
+  <p class="mt-5 text-sm">Сетка и расчёт мест ожидают утверждённого регламента турнира.</p>
+  {% if is_organiser and not event.started_at %}<a class="mt-5 inline-flex min-h-12 items-center px-2 underline" href="{% url 'event-deletion-preview' event.pk %}">Проверить и удалить мероприятие</a>{% endif %}
+</main>
+{% endblock %}

@@ -19,7 +19,7 @@ class Command(BaseCommand):
             raise CommandError("Configure local E5 and enable SUPPORT_AI_LOOKUP_ENABLED.")
         try:
             get_embedder()
-            if settings.SUPPORT_AI_GENERATION_ENABLED:
+            if settings.SUPPORT_AI_GENERATION_ENABLED or settings.SUPPORT_AI_CONTEXT_ENABLED:
                 local_endpoint()
         except (ImportError, ModelUnavailable, OSError, ValueError) as exc:
             raise CommandError(f"Cannot initialize local E5: {exc}") from exc

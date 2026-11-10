@@ -41,6 +41,9 @@ INSTALLED_APPS = [
     "storage.apps.StorageConfig",
     "workspace.apps.WorkspaceConfig",
     "knowledge.apps.KnowledgeConfig",
+    "participants.apps.ParticipantsConfig",
+    "notifications.apps.NotificationsConfig",
+    "events.apps.EventsConfig",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -61,6 +64,7 @@ LANGUAGE_CODE = "ru"
 TIME_ZONE = "Europe/Moscow"
 USE_TZ = True
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 10_000
 SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
 if os.environ.get("DJANGO_TRUST_HTTPS_PROXY") == "1":
@@ -79,6 +83,12 @@ if any(CAS_ROOT.is_relative_to(path.resolve()) or path.resolve().is_relative_to(
        for path in [STATIC_ROOT, *STATICFILES_DIRS]):
     raise ImproperlyConfigured("CAS_ROOT must be separate from public static files.")
 BACKGROUND_TASK_HANDLERS = {
+    "notifications.apply_preferences_click": "notifications.bot_actions.handle_preferences_click",
+    "events.commit_deletion": "events.deletion.commit_deletion_task",
+    "events.clean_deleted_data": "events.deletion.cleanup_task",
+    "notifications.prepare_cancellation": "notifications.event_messages.prepare_cancellation_task",
+    "participants.confirm_binding": "participants.services.confirm_binding_task",
+    "knowledge.read_source": "knowledge.sources.read_source_task",
     "knowledge.prepare_text": "knowledge.preparation.prepare_text_task",
     "support.route_inbound": "vk_channel.services.route_inbound_task",
     "vk.handle_student_click": "vk_channel.student_actions.handle_click_task",
@@ -90,7 +100,7 @@ VK_ID_REDIRECT_URI = os.environ.get("VK_ID_REDIRECT_URI", "")
 
 def redact_login_query(record):
     message = record.getMessage()
-    for route in ("/auth/vk/callback/", "/auth/vk/recovery/"):
+    for route in ("/auth/vk/callback/", "/auth/vk/recovery/", "/participant/open/"):
         prefix, sep, suffix = message.partition(f"{route}?")
         if sep:
             record.msg = f"{prefix}{route}" + (" " + suffix.partition(" ")[2] if " " in suffix else "")
@@ -133,13 +143,26 @@ VK_GAP_HISTORY_VERIFIED = os.environ.get("VK_GAP_HISTORY_VERIFIED") == "1"
 VK_CLICK_ANSWERS_VERIFIED = os.environ.get("VK_CLICK_ANSWERS_VERIFIED") == "1"
 
 KNOWLEDGE_E5_ROOT = os.environ.get("KNOWLEDGE_E5_ROOT", "")
+KNOWLEDGE_GOOGLE_ENABLED = os.environ.get("KNOWLEDGE_GOOGLE_ENABLED") == "1"
+GOOGLE_SERVICE_ACCOUNT_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "")
 
 SUPPORT_AI_LOOKUP_ENABLED = os.environ.get("SUPPORT_AI_LOOKUP_ENABLED") == "1"
 
 SUPPORT_AI_GENERATION_ENABLED = os.environ.get("SUPPORT_AI_GENERATION_ENABLED") == "1"
+SUPPORT_AI_CONTEXT_ENABLED = os.environ.get("SUPPORT_AI_CONTEXT_ENABLED") == "1"
 SUPPORT_AI_HANDOFF_ENABLED = os.environ.get("SUPPORT_AI_HANDOFF_ENABLED") == "1"
+SUPPORT_AI_JOIN_WINDOW_SECONDS = int(os.environ.get("SUPPORT_AI_JOIN_WINDOW_SECONDS", "0"))
+if not 0 <= SUPPORT_AI_JOIN_WINDOW_SECONDS < 2**31:
+    raise ValueError("SUPPORT_AI_JOIN_WINDOW_SECONDS must be a nonnegative 32-bit integer.")
 MODEL_BASE_URL = os.environ.get("MODEL_BASE_URL", "")
 MODEL_NAME = os.environ.get("MODEL_NAME", "")
 MODEL_SHA256 = os.environ.get("MODEL_SHA256", "")
 VK_BOT_SEND_ENABLED = os.environ.get("VK_BOT_SEND_ENABLED") == "1"
 VK_BOT_RECONCILIATION_AUTO_ENABLED = os.environ.get("VK_BOT_RECONCILIATION_AUTO_ENABLED") == "1"
+PARTICIPANT_BINDING_VERIFIED = os.environ.get("PARTICIPANT_BINDING_VERIFIED") == "1"
+VK_GENERAL_SEND_ENABLED = os.environ.get("VK_GENERAL_SEND_ENABLED") == "1"
+PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+APP_ENVIRONMENT_ID = os.environ.get("APP_ENVIRONMENT_ID", "").strip()
+EVENT_DELETION_LEDGER_DSN = os.environ.get("EVENT_DELETION_LEDGER_DSN", "")
+if APP_ENVIRONMENT_ID and (len(APP_ENVIRONMENT_ID) > 128 or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for ch in APP_ENVIRONMENT_ID)):
+    raise ImproperlyConfigured("APP_ENVIRONMENT_ID must contain up to 128 ASCII letters, digits, underscores, dots or hyphens.")

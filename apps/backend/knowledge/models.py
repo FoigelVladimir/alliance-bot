@@ -26,6 +26,12 @@ class MaterialVersion(models.Model):
     tags = models.JSONField(default=list)
     source_type = models.CharField(max_length=16, default="text")
     source_text = models.TextField(blank=True)
+    source_file = models.ForeignKey("storage.FileObject", null=True, on_delete=models.PROTECT, related_name="+")
+    source_filename = models.CharField(max_length=200, blank=True)
+    source_google_id = models.CharField(max_length=160, blank=True)
+    current_source_read = models.ForeignKey("SourceRead", null=True, on_delete=models.PROTECT, related_name="+")
+    current_table_snapshot = models.ForeignKey("TableReadSnapshot", null=True, on_delete=models.PROTECT, related_name="+")
+    table_selection = models.JSONField(default=list)
     draft_revision = models.PositiveBigIntegerField(default=1)
     base_publication_revision = models.PositiveBigIntegerField(default=0)
     created_at = models.DateTimeField(default=timezone.now)
@@ -44,7 +50,13 @@ class MaterialVersion(models.Model):
         db_table = "kb_document_version"
         constraints = [
             models.CheckConstraint(condition=Q(draft_revision__gt=0), name="kb_draft_positive_revision"),
-            models.CheckConstraint(condition=Q(source_type="text"), name="kb_version_supported_source"),
+            models.CheckConstraint(condition=Q(source_type__in=["text", "txt", "docx", "pdf", "xlsx", "google"]), name="kb_version_supported_source"),
+            models.CheckConstraint(
+                condition=Q(source_type="text", source_file__isnull=True, source_google_id="")
+                | Q(source_type__in=["txt", "docx", "pdf", "xlsx"], source_file__isnull=False, source_google_id="")
+                | (Q(source_type="google", source_file__isnull=True) & ~Q(source_google_id="")),
+                name="kb_version_source_reference",
+            ),
             models.UniqueConstraint(fields=["material"], condition=Q(is_published=True),
                                     name="kb_one_published_version"),
             models.CheckConstraint(
@@ -70,7 +82,7 @@ class MaterialCommand(models.Model):
         db_table = "kb_command"
         constraints = [
             models.UniqueConstraint(fields=["actor", "client_operation_id"], name="kb_actor_operation_unique"),
-            models.CheckConstraint(condition=Q(action__in=["create_material", "create_draft", "save_draft", "prepare", "publish", "unpublish", "rebase", "from_support"]),
+            models.CheckConstraint(condition=Q(action__in=["create_material", "create_draft", "save_draft", "prepare", "publish", "unpublish", "rebase", "from_support", "upload_source", "connect_google", "refresh_google", "select_table"]),
                                    name="kb_command_known_action"),
         ]
 
@@ -80,6 +92,7 @@ class MaterialPreparation(models.Model):
     command = models.OneToOneField(MaterialCommand, on_delete=models.PROTECT)
     version = models.ForeignKey(MaterialVersion, on_delete=models.PROTECT)
     draft_revision = models.PositiveBigIntegerField()
+    access_generation = models.PositiveIntegerField(null=True)
     task = models.OneToOneField("jobs.BackgroundTask", on_delete=models.PROTECT)
 
     class Meta:
@@ -90,10 +103,40 @@ class SourceSnapshot(models.Model):
     preparation = models.OneToOneField(MaterialPreparation, on_delete=models.PROTECT, related_name="snapshot")
     prepared_text = models.TextField()
     source_sha256 = models.CharField(max_length=64)
+    original_file = models.ForeignKey("storage.FileObject", null=True, on_delete=models.PROTECT, related_name="+")
+    table_snapshot = models.ForeignKey("TableReadSnapshot", null=True, on_delete=models.PROTECT, related_name="+")
+    selection_snapshot = models.JSONField(default=list)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
         db_table = "kb_source_snapshot"
+
+
+class SourceRead(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
+    command = models.OneToOneField(MaterialCommand, on_delete=models.PROTECT)
+    version = models.ForeignKey(MaterialVersion, on_delete=models.PROTECT)
+    draft_revision = models.PositiveBigIntegerField()
+    task = models.OneToOneField("jobs.BackgroundTask", on_delete=models.PROTECT)
+    source_file = models.ForeignKey("storage.FileObject", null=True, on_delete=models.PROTECT, related_name="+")
+    google_id = models.CharField(max_length=160, blank=True)
+    access_generation = models.PositiveIntegerField()
+    previous_snapshot = models.ForeignKey("TableReadSnapshot", null=True, on_delete=models.PROTECT, related_name="+")
+    previous_selection = models.JSONField(default=list)
+
+    class Meta:
+        db_table = "kb_source_read"
+
+
+class TableReadSnapshot(models.Model):
+    read = models.OneToOneField(SourceRead, on_delete=models.PROTECT, related_name="snapshot")
+    data = models.JSONField()
+    mapping_issues = models.JSONField(default=list)
+    mapping_suggestions = models.JSONField(default=list)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "kb_table_read_snapshot"
 
 
 class FragmentGeneration(models.Model):

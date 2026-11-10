@@ -68,13 +68,14 @@ def issue_request_action(request_id, user_id, action, expires_at):
 
 def bot_keyboard(answer, delivery, now):
     from support.attachment_responses import PROFILE
+    from support.context_responses import PROFILE as CONTEXT_PROFILE
 
     inputs = list(answer.inputs.select_related("request")[:2])
     if len(inputs) != 1:
         return None
     question = inputs[0].request
     actions = ["call_manager"]
-    if (not answer.aiprocessingrun.handoff_plan_id and answer.retrieval_snapshot.get("profile") != PROFILE
+    if (not answer.aiprocessingrun.handoff_plan_id and answer.retrieval_snapshot.get("profile") not in {PROFILE, CONTEXT_PROFILE}
             and not answer.parts.filter(position__gt=delivery.part.position).exists()):
         actions.insert(0, "resolve")
     buttons = [issue_request_action(question.pk, answer.dialog.vk_peer_id, action, now + ACTION_LIFETIME)
@@ -123,7 +124,19 @@ def queue_click(cursor, update, gap):
         status=InboundEvent.Status.ACCEPTED, received_at=now,
     )
     click = StudentClick.objects.create(**key, action_id=action_id, event=event, answer_deadline=now + ANSWER_WINDOW)
-    enqueue(HANDLE_CLICK, click_key(HANDLE_CLICK, click.pk), {"click_id": click.pk}, priority=20)
+    handler = HANDLE_CLICK
+    from django.conf import settings
+    if settings.PARTICIPANT_BINDING_VERIFIED:
+        from participants.models import BindingAttempt
+        from participants.services import CONFIRM_TASK
+        if BindingAttempt.objects.filter(pk=action_id).exists():
+            handler = CONFIRM_TASK
+        else:
+            from notifications.models import PreferenceAction
+            from notifications.bot_actions import TASK_TYPE as PREFERENCE_TASK
+            if PreferenceAction.objects.filter(pk=action_id).exists():
+                handler = PREFERENCE_TASK
+    enqueue(handler, click_key(handler, click.pk), {"click_id": click.pk}, priority=20)
 
 
 def click_key(kind, pk):

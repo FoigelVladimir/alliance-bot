@@ -13,6 +13,7 @@
       <p class="whitespace-pre-wrap break-words">{{ route.message.text|default:"Сообщение без текста" }}</p>
       {% support_attachments route.message %}
     </section>
+    {% include "support/ai_join.html" %}
     <form class="mt-6" action="{% url 'support-route' route.pk %}" method="post" data-support-command data-ticket-result>
       {% csrf_token %}
       <input type="hidden" name="client_operation_id" value="{{ route_operation_id }}">
